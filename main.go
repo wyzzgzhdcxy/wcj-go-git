@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
 	"wcj-go-common/core"
 	myUtil "wcj-go-common/utils"
 
@@ -125,6 +126,7 @@ func main() {
 		Height:            height,
 		Frameless:         false,
 		HideWindowOnClose: true,
+		StartHidden:       isHiddenStart(),
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -143,10 +145,6 @@ func main() {
 			// 如果窗口之前是最大化状态，恢复最大化
 			if ws.Maximized == 1 {
 				runtime.WindowMaximise(ctx)
-			}
-			// 如果带 --hidden 或 -h 参数启动，则隐藏窗口
-			if isHiddenStart() {
-				runtime.WindowHide(ctx)
 			}
 		},
 		OnShutdown: application.Shutdown,
