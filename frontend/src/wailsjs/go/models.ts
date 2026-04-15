@@ -1,4 +1,4 @@
-export namespace app {
+export namespace main {
 	
 	export class GitRepo {
 	    path: string;
@@ -11,6 +11,7 @@ export namespace app {
 	    enabled: boolean;
 	    autoSync: boolean;
 	    intervalSeconds: number;
+	    commitOnly: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new GitRepo(source);
@@ -28,6 +29,7 @@ export namespace app {
 	        this.enabled = source["enabled"];
 	        this.autoSync = source["autoSync"];
 	        this.intervalSeconds = source["intervalSeconds"];
+	        this.commitOnly = source["commitOnly"];
 	    }
 	}
 	export class GetAutoSyncStatusRes {

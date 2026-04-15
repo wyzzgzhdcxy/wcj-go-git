@@ -1,4 +1,4 @@
-package app
+package main
 
 import (
 	"bufio"
@@ -19,8 +19,6 @@ import (
 	"sync"
 	"time"
 	"wcj-go-common/core"
-	"wcj-go-git/golang/cmdWrapper"
-	"wcj-go-git/golang/utils"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -45,7 +43,33 @@ func NewApp(assets embed.FS) *App {
 
 // startup is called when the application starts
 func (a *App) Startup(ctx context.Context) {
+	log.Printf("Startup 被调用")
 	a.ctx = ctx
+	// 程序启动时自动开始后台自动同步
+	go a.startBackgroundSync()
+}
+
+// startBackgroundSync 启动后台自动同步（程序启动时自动运行）
+func (a *App) startBackgroundSync() {
+	log.Printf("startBackgroundSync 开始执行")
+	// 等待数据库初始化完成
+	time.Sleep(2 * time.Second)
+
+	// 加载所有仓库
+	reposRes := a.LoadGitRepoList()
+	if !reposRes.Success || len(reposRes.Repos) == 0 {
+		log.Println("没有找到需要自动同步的仓库")
+		return
+	}
+
+	if len(reposRes.Repos) == 0 {
+		log.Println("没有启用自动同步的仓库")
+		return
+	}
+
+	// 启动自动同步（StartAutoSync 内部会筛选出启用自动同步的仓库）
+	log.Printf("程序启动，自动开始后台同步，共 %d 个仓库", len(reposRes.Repos))
+	a.StartAutoSync(StartAutoSyncReq{Repos: reposRes.Repos})
 }
 
 // shutdown is called when the application is about to quit
@@ -60,7 +84,7 @@ func (a *App) Shutdown(ctx context.Context) {
 
 // InitSettingsDb 初始化配置数据库（sqlite）
 func (a *App) InitSettingsDb() error {
-	dbPath := core.GetTempDir() + "/data/wcj-go-git-settings.db"
+	dbPath := core.GetTempDir() + "/data/sync_list.db"
 	// 确保目录存在
 	dbDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -101,7 +125,7 @@ func (a *App) InitSettingsDb() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo_name TEXT NOT NULL,
 			repo_path TEXT NOT NULL,
-			time DATETIME DEFAULT CURRENT_TIMESTAMP,
+			time TEXT,
 			success INTEGER NOT NULL DEFAULT 0,
 			message TEXT,
 			commit_log TEXT,
@@ -130,11 +154,12 @@ func (a *App) InitSettingsDb() error {
 			branch TEXT,
 			remote TEXT,
 			remote_url TEXT,
-			last_sync_time DATETIME,
+			last_sync_time TEXT,
 			status TEXT,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			auto_sync INTEGER NOT NULL DEFAULT 0,
 			interval_seconds INTEGER NOT NULL DEFAULT 60,
+			commit_only INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
@@ -156,6 +181,13 @@ func (a *App) InitSettingsDb() error {
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		db.Close()
 		return fmt.Errorf("添加enabled列失败: %v", err)
+	}
+
+	// 添加commit_only列（如果不存在）
+	_, err = db.Exec(`ALTER TABLE git_repos ADD COLUMN commit_only INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
+		return fmt.Errorf("添加commit_only列失败: %v", err)
 	}
 
 	// 创建窗口状态表
@@ -216,6 +248,26 @@ func (a *App) SaveWindowState(ws WindowState) error {
 	return err
 }
 
+// SaveCurrentWindowState 捕获并保存当前窗口状态
+func (a *App) SaveCurrentWindowState() error {
+	if a.ctx == nil {
+		return fmt.Errorf("context未初始化")
+	}
+	width, height := runtime.WindowGetSize(a.ctx)
+	x, y := runtime.WindowGetPosition(a.ctx)
+	maximized := 0
+	if runtime.WindowIsMaximised(a.ctx) {
+		maximized = 1
+	}
+	return a.SaveWindowState(WindowState{
+		Width:     width,
+		Height:    height,
+		X:         x,
+		Y:         y,
+		Maximized: maximized,
+	})
+}
+
 // SelectDirectory 打开目录选择对话框
 func (a *App) SelectDirectory() (string, error) {
 	selection, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
@@ -241,6 +293,7 @@ type GitRepo struct {
 	Enabled         bool   `json:"enabled"`         // 是否启用
 	AutoSync        bool   `json:"autoSync"`        // 是否自动同步
 	IntervalSeconds int    `json:"intervalSeconds"` // 同步间隔(秒)
+	CommitOnly      bool   `json:"commitOnly"`      // 仅提交，不推送
 }
 
 // GitSyncReq Git同步请求
@@ -285,20 +338,20 @@ func (a *App) GitSync(req GitSyncReq) GitSyncRes {
 		}
 
 		// 执行 git add .
-		addOutput, addErr := cmdWrapper.RunWithDirAndOutput(repo.Path, "git", "add", "-A")
+		addOutput, addErr := RunWithDirAndOutput(repo.Path, "git", "add", "-A")
 		result.CommitLog = string(addOutput)
 		if addErr != nil {
 			result.CommitLog += "\n错误: " + addErr.Error()
 		}
 
 		// 检查是否有需要提交的更改
-		statusOutput, _ := cmdWrapper.RunWithDirAndOutput(repo.Path, "git", "status", "--porcelain")
+		statusOutput, _ := RunWithDirAndOutput(repo.Path, "git", "status", "--porcelain")
 		hasChanges := len(strings.TrimSpace(string(statusOutput))) > 0
 
 		if hasChanges {
 			// 执行 git commit
 			commitMsg := fmt.Sprintf("Sync: %s", time.Now().Format("2006-01-02 15:04:05"))
-			commitOutput, commitErr := cmdWrapper.RunWithDirAndOutput(repo.Path, "git", "commit", "-m", commitMsg)
+			commitOutput, commitErr := RunWithDirAndOutput(repo.Path, "git", "commit", "-m", commitMsg)
 			result.CommitLog += "\n" + string(commitOutput)
 			if commitErr != nil {
 				result.CommitLog += "\n错误: " + commitErr.Error()
@@ -308,17 +361,22 @@ func (a *App) GitSync(req GitSyncReq) GitSyncRes {
 		}
 
 		// 执行 git pull
-		pullOutput, pullErr := cmdWrapper.RunWithDirAndOutput(repo.Path, "git", "pull", repo.Remote, repo.Branch)
+		pullOutput, pullErr := RunWithDirAndOutput(repo.Path, "git", "pull", repo.Remote, repo.Branch)
 		result.PullLog = string(pullOutput)
 		if pullErr != nil {
 			result.PullLog += "\n错误: " + pullErr.Error()
 		}
 
-		// 执行 git push
-		pushOutput, pushErr := cmdWrapper.RunWithDirAndOutput(repo.Path, "git", "push", repo.Remote, repo.Branch)
-		result.PushLog = string(pushOutput)
-		if pushErr != nil {
-			result.PushLog += "\n错误: " + pushErr.Error()
+		// 如果是仅提交模式，跳过 push
+		if !repo.CommitOnly {
+			// 执行 git push
+			pushOutput, pushErr := RunWithDirAndOutput(repo.Path, "git", "push", repo.Remote, repo.Branch)
+			result.PushLog = string(pushOutput)
+			if pushErr != nil {
+				result.PushLog += "\n错误: " + pushErr.Error()
+			}
+		} else {
+			result.PushLog = "仅提交模式，跳过 push"
 		}
 
 		result.Success = true
@@ -397,11 +455,11 @@ func (a *App) GetGitRepoInfo(req GetGitRepoInfoReq) GetGitRepoInfoRes {
 	}
 
 	// 获取当前分支
-	branchOutput, _ := cmdWrapper.RunWithDirAndOutput(req.Path, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchOutput, _ := RunWithDirAndOutput(req.Path, "git", "rev-parse", "--abbrev-ref", "HEAD")
 	branch := strings.TrimSpace(string(branchOutput))
 
 	// 获取远程仓库信息
-	remoteOutput, _ := cmdWrapper.RunWithDirAndOutput(req.Path, "git", "remote", "get-url", "origin")
+	remoteOutput, _ := RunWithDirAndOutput(req.Path, "git", "remote", "get-url", "origin")
 	remoteUrl := strings.TrimSpace(string(remoteOutput))
 
 	// 获取仓库名称
@@ -466,8 +524,8 @@ func (a *App) SaveGitRepoList(req GitRepoListReq) GitRepoListRes {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-		INSERT INTO git_repos (path, name, branch, remote, remote_url, last_sync_time, status, enabled, auto_sync, interval_seconds)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO git_repos (path, name, branch, remote, remote_url, last_sync_time, status, enabled, auto_sync, interval_seconds, commit_only)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return GitRepoListRes{
@@ -486,7 +544,11 @@ func (a *App) SaveGitRepoList(req GitRepoListReq) GitRepoListRes {
 		if repo.Enabled {
 			enabled = 1
 		}
-		_, err = stmt.Exec(repo.Path, repo.Name, repo.Branch, repo.Remote, repo.RemoteUrl, repo.LastSyncTime, repo.Status, enabled, autoSync, repo.IntervalSeconds)
+		commitOnly := 0
+		if repo.CommitOnly {
+			commitOnly = 1
+		}
+		_, err = stmt.Exec(repo.Path, repo.Name, repo.Branch, repo.Remote, repo.RemoteUrl, repo.LastSyncTime, repo.Status, enabled, autoSync, repo.IntervalSeconds, commitOnly)
 		if err != nil {
 			return GitRepoListRes{
 				Success: false,
@@ -501,6 +563,9 @@ func (a *App) SaveGitRepoList(req GitRepoListReq) GitRepoListRes {
 			Message: "提交事务失败: " + err.Error(),
 		}
 	}
+
+	// 同步更新自动同步缓存
+	updateAutoSyncReposCache(req.Repos)
 
 	return GitRepoListRes{
 		Success: true,
@@ -520,7 +585,7 @@ func (a *App) LoadGitRepoList() GitRepoListRes {
 	}
 
 	rows, err := a.SettingsDb.Query(`
-		SELECT path, name, branch, remote, remote_url, last_sync_time, status, enabled, auto_sync, interval_seconds
+		SELECT path, name, branch, remote, remote_url, last_sync_time, status, enabled, auto_sync, interval_seconds, commit_only
 		FROM git_repos ORDER BY id
 	`)
 	if err != nil {
@@ -535,13 +600,14 @@ func (a *App) LoadGitRepoList() GitRepoListRes {
 	repos := []GitRepo{}
 	for rows.Next() {
 		var repo GitRepo
-		var enabled, autoSync int
-		err := rows.Scan(&repo.Path, &repo.Name, &repo.Branch, &repo.Remote, &repo.RemoteUrl, &repo.LastSyncTime, &repo.Status, &enabled, &autoSync, &repo.IntervalSeconds)
+		var enabled, autoSync, commitOnly int
+		err := rows.Scan(&repo.Path, &repo.Name, &repo.Branch, &repo.Remote, &repo.RemoteUrl, &repo.LastSyncTime, &repo.Status, &enabled, &autoSync, &repo.IntervalSeconds, &commitOnly)
 		if err != nil {
 			continue
 		}
 		repo.Enabled = enabled == 1
 		repo.AutoSync = autoSync == 1
+		repo.CommitOnly = commitOnly == 1
 		repos = append(repos, repo)
 	}
 
@@ -649,9 +715,12 @@ type StartAutoSyncRes struct {
 // autoSyncTicker 自动同步定时器
 var autoSyncTicker *time.Ticker
 var autoSyncRunning bool
+var autoSyncReposCache []GitRepo // 自动同步仓库缓存
+var autoSyncReposMu sync.RWMutex // 保护缓存的读写锁
 
 // StartAutoSync 启动自动同步
 func (a *App) StartAutoSync(req StartAutoSyncReq) StartAutoSyncRes {
+	log.Printf("StartAutoSync 被调用, autoSyncRunning=%v, 请求仓库数=%d", autoSyncRunning, len(req.Repos))
 	if autoSyncRunning {
 		return StartAutoSyncRes{
 			Success: false,
@@ -662,10 +731,13 @@ func (a *App) StartAutoSync(req StartAutoSyncReq) StartAutoSyncRes {
 	// 收集需要自动同步的仓库
 	autoSyncRepos := make([]GitRepo, 0)
 	for _, repo := range req.Repos {
-		if repo.AutoSync && repo.IntervalSeconds > 0 {
+		log.Printf("检查仓库 %s: AutoSync=%v, CommitOnly=%v, IntervalSeconds=%d", repo.Name, repo.AutoSync, repo.CommitOnly, repo.IntervalSeconds)
+		if (repo.AutoSync || repo.CommitOnly) && repo.IntervalSeconds > 0 {
 			autoSyncRepos = append(autoSyncRepos, repo)
 		}
 	}
+
+	log.Printf("符合条件的仓库数: %d", len(autoSyncRepos))
 
 	if len(autoSyncRepos) == 0 {
 		return StartAutoSyncRes{
@@ -676,16 +748,24 @@ func (a *App) StartAutoSync(req StartAutoSyncReq) StartAutoSyncRes {
 
 	autoSyncRunning = true
 
+	log.Printf("StartAutoSync: 设置 autoSyncRunning=true")
+
+	// 初始化缓存
+	updateAutoSyncReposCache(autoSyncRepos)
+
+	log.Printf("StartAutoSync: 缓存已更新，准备创建 ticker")
+
 	// 每10秒检查一次
 	autoSyncTicker = time.NewTicker(10 * time.Second)
 	go func() {
-		for {
-			select {
-			case <-autoSyncTicker.C:
-				// 检查每个仓库是否需要同步
-				for _, repo := range autoSyncRepos {
-					a.doAutoSync(repo)
-				}
+		for range autoSyncTicker.C {
+			log.Printf("定时任务触发")
+			// 从缓存读取仓库列表
+			repos := getAutoSyncReposCache()
+			log.Printf("缓存中 %d 个仓库", len(repos))
+			// 检查每个仓库是否需要同步
+			for _, repo := range repos {
+				a.doAutoSync(repo)
 			}
 		}
 	}()
@@ -701,13 +781,15 @@ func (a *App) StartAutoSync(req StartAutoSyncReq) StartAutoSyncRes {
 // doAutoSync 执行自动同步
 func (a *App) doAutoSync(repo GitRepo) {
 	now := time.Now()
-	lastSync, err := time.Parse("2006-01-02 15:04:05", repo.LastSyncTime)
-
+		lastSync, err := time.ParseInLocation("2006-01-02 15:04:05", repo.LastSyncTime, time.Local)
+	
 	// 如果解析失败（首次同步或格式错误），则立即同步
 	if err != nil || lastSync.IsZero() {
 		log.Printf("自动同步(首次或时间解析失败): %s", repo.Name)
 	} else if now.Sub(lastSync).Seconds() < float64(repo.IntervalSeconds) {
 		// 检查是否到达同步时间
+		log.Printf("自动同步检查: %s, 距上次同步 %.0f 秒, 间隔 %d 秒, 跳过",
+			repo.Name, now.Sub(lastSync).Seconds(), repo.IntervalSeconds)
 		return
 	}
 
@@ -733,6 +815,8 @@ func (a *App) doAutoSync(repo GitRepo) {
 	// 更新仓库的上次同步时间
 	repo.LastSyncTime = now.Format("2006-01-02 15:04:05")
 	a.updateRepoLastSyncTime(repo)
+	// 更新缓存中的同步时间
+	updateAutoSyncRepoInCache(repo.Path, repo.LastSyncTime)
 }
 
 // saveSyncLog 保存同步日志到SQLite
@@ -789,7 +873,6 @@ func (a *App) StopAutoSync() {
 	}
 	autoSyncRunning = false
 	log.Println("自动同步已停止")
-	return
 }
 
 // GetAutoSyncStatus 获取自动同步状态
@@ -904,7 +987,7 @@ func (a *App) SetJsonConfig(key string, value interface{}) error {
 
 // OpenUrl 打开URL
 func (a *App) OpenUrl(url string) error {
-	return utils.OpenUrl(url)
+	return OpenUrl(url)
 }
 
 // StartLocalFileServer 启动本地文件服务
@@ -1080,6 +1163,45 @@ func (a *App) ShowWindow() {
 // IsWindowMaximized 窗口是否最大化
 func (a *App) IsWindowMaximized() bool {
 	return runtime.WindowIsMaximised(a.ctx)
+}
+
+// ==================== 自动同步缓存相关 ====================
+
+// updateAutoSyncReposCache 更新自动同步仓库缓存
+func updateAutoSyncReposCache(repos []GitRepo) {
+	autoSyncReposMu.Lock()
+	defer autoSyncReposMu.Unlock()
+
+	autoSyncReposCache = make([]GitRepo, 0)
+	for _, repo := range repos {
+		if (repo.AutoSync || repo.CommitOnly) && repo.IntervalSeconds > 0 {
+			autoSyncReposCache = append(autoSyncReposCache, repo)
+		}
+	}
+	log.Printf("更新自动同步缓存，共 %d 个仓库", len(autoSyncReposCache))
+}
+
+// updateAutoSyncRepoInCache 更新缓存中指定仓库的同步时间
+func updateAutoSyncRepoInCache(repoPath, lastSyncTime string) {
+	autoSyncReposMu.Lock()
+	defer autoSyncReposMu.Unlock()
+
+	for i := range autoSyncReposCache {
+		if autoSyncReposCache[i].Path == repoPath {
+			autoSyncReposCache[i].LastSyncTime = lastSyncTime
+			break
+		}
+	}
+}
+
+// getAutoSyncReposCache 获取自动同步仓库缓存的副本
+func getAutoSyncReposCache() []GitRepo {
+	autoSyncReposMu.RLock()
+	defer autoSyncReposMu.RUnlock()
+
+	repos := make([]GitRepo, len(autoSyncReposCache))
+	copy(repos, autoSyncReposCache)
+	return repos
 }
 
 // ==================== Scanner 相关 ====================

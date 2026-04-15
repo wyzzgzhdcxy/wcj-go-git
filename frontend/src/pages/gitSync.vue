@@ -11,18 +11,31 @@
                 <el-tag size="small" type="info">{{ repoList.length }} 个</el-tag>
               </div>
               <div class="header-right">
-                <el-button type="primary" @click="selectFolder" :icon="FolderAdd">添加仓库</el-button>
+                <el-button type="primary" @click="selectFolder" :icon="FolderAdd">添加</el-button>
+                <el-button type="success" @click="syncAll" :loading="syncing" :icon="Refresh">同步</el-button>
               </div>
             </div>
           </template>
 
           <el-table :data="repoList" border style="width: 100%" max-height="350">
-            <el-table-column prop="name" label="仓库名称" width="150" />
-            <el-table-column prop="path" label="路径" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="name" label="仓库名称" width="150">
+              <template #default="scope">
+                <el-tooltip :content="scope.row.path" placement="top">
+                  <span>{{ scope.row.name }}</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column prop="branch" label="分支" width="80" align="center" />
+            <el-table-column label="仅提交" width="80" align="center">
+              <template #default="scope">
+                <el-tooltip content="仅提交，不推送" placement="top">
+                  <el-switch v-model="scope.row.commitOnly" :disabled="!scope.row.enabled" @change="(val) => toggleCommitOnly(scope.row, val)" />
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column label="自动同步" width="100" align="center">
               <template #default="scope">
-                <el-switch v-model="scope.row.autoSync" :disabled="!scope.row.enabled" @change="toggleAutoSync(scope.row)" />
+                <el-switch v-model="scope.row.autoSync" :disabled="!scope.row.enabled" @change="(val) => toggleAutoSync(scope.row, val)" />
               </template>
             </el-table-column>
             <el-table-column label="启用" width="70" align="center">
@@ -33,7 +46,7 @@
             <el-table-column label="间隔(秒)" width="130" align="center">
               <template #default="scope">
                 <el-input-number
-                  v-if="scope.row.autoSync && scope.row.enabled"
+                  v-if="scope.row.enabled && (scope.row.autoSync || scope.row.commitOnly)"
                   v-model="scope.row.intervalSeconds"
                   :min="10"
                   :max="3600"
@@ -60,10 +73,6 @@
           </el-table>
 
           <div class="操作按钮">
-            <el-button type="success" @click="syncAll" :loading="syncing" :icon="Refresh">同步所有仓库</el-button>
-            <el-tag :type="autoSyncRunning ? 'success' : 'info'" size="small" class="status-tag">
-              {{ autoSyncRunning ? '自动同步运行中' : '自动同步已停止' }}
-            </el-tag>
           </div>
         </el-card>
       </el-col>
@@ -136,7 +145,7 @@ const autoSyncRunning = ref(false)
 let refreshTimer = null
 
 // 最新4条同步记录
-const latestLogs = computed(() => syncLogs.value.slice(0, 4))
+const latestLogs = computed(() => syncLogs.value.slice(0, 3))
 
 // 格式化时间
 const formatTime = (timeStr) => {
@@ -150,7 +159,7 @@ const formatTime = (timeStr) => {
 // 加载保存的仓库列表
 const loadRepos = async () => {
   try {
-    const { LoadGitRepoList } = await import('../wailsjs/go/app/App.js')
+    const { LoadGitRepoList } = await import('../wailsjs/go/main/App.js')
     const result = await LoadGitRepoList()
     if (result.success && result.repos) {
       repoList.value = result.repos
@@ -163,7 +172,7 @@ const loadRepos = async () => {
 // 加载同步日志
 const loadSyncLogs = async () => {
   try {
-    const { GetSyncLogs } = await import('../wailsjs/go/app/App.js')
+    const { GetSyncLogs } = await import('../wailsjs/go/main/App.js')
     const result = await GetSyncLogs({ limit: 50 })
     if (result.success) {
       syncLogs.value = result.logs || []
@@ -176,7 +185,7 @@ const loadSyncLogs = async () => {
 // 检查自动同步状态
 const checkAutoSyncStatus = async () => {
   try {
-    const { GetAutoSyncStatus } = await import('../wailsjs/go/app/App.js')
+    const { GetAutoSyncStatus } = await import('../wailsjs/go/main/App.js')
     const result = await GetAutoSyncStatus()
     autoSyncRunning.value = result.running
   } catch (error) {
@@ -184,13 +193,14 @@ const checkAutoSyncStatus = async () => {
   }
 }
 
-// 启动自动刷新日志
+// 启动自动刷新日志和仓库列表
 const startAutoRefresh = () => {
   if (refreshTimer) {
     clearInterval(refreshTimer)
   }
   refreshTimer = setInterval(() => {
     loadSyncLogs()
+    loadRepos()
   }, 3000)
 }
 
@@ -205,7 +215,7 @@ const stopAutoRefresh = () => {
 // 选择文件夹
 const selectFolder = async () => {
   try {
-    const { SelectDirectory, GetGitRepoInfo } = await import('../wailsjs/go/app/App.js')
+    const { SelectDirectory, GetGitRepoInfo } = await import('../wailsjs/go/main/App.js')
     const dirPath = await SelectDirectory()
     if (dirPath) {
       const result = await GetGitRepoInfo({ path: dirPath })
@@ -237,14 +247,25 @@ const removeRepo = (index) => {
 }
 
 // 切换单个仓库的自动同步
-const toggleAutoSync = (repo) => {
+const toggleAutoSync = (repo, newVal) => {
+  if (newVal && repo.commitOnly) {
+    repo.commitOnly = false
+  }
+  saveRepos()
+}
+
+// 切换单个仓库的仅提交
+const toggleCommitOnly = (repo, newVal) => {
+  if (newVal && repo.autoSync) {
+    repo.autoSync = false
+  }
   saveRepos()
 }
 
 // 保存仓库列表
 const saveRepos = async () => {
   try {
-    const { SaveGitRepoList } = await import('../wailsjs/go/app/App.js')
+    const { SaveGitRepoList } = await import('../wailsjs/go/main/App.js')
     const result = await SaveGitRepoList({ repos: repoList.value })
     if (result.success) {
       // 保存成功，静默
@@ -268,7 +289,7 @@ const syncAll = async () => {
   syncResults.value = []
 
   try {
-    const { GitSync } = await import('../wailsjs/go/app/App.js')
+    const { GitSync } = await import('../wailsjs/go/main/App.js')
     const result = await GitSync({ repos: enabledRepos })
     if (result.success) {
       syncResults.value = result.results
@@ -290,20 +311,37 @@ onMounted(() => {
   loadSyncLogs()
   checkAutoSyncStatus()
   startAutoRefresh()
+
+  // 窗口尺寸变化时保存状态
+  window.addEventListener('resize', saveWindowState)
+  window.addEventListener('move', saveWindowState)
+  window.addEventListener('beforeunload', saveWindowState)
 })
 
 onUnmounted(() => {
   stopAutoRefresh()
+  window.removeEventListener('resize', saveWindowState)
+  window.removeEventListener('move', saveWindowState)
+  window.removeEventListener('beforeunload', saveWindowState)
 })
+
+// 保存窗口状态
+const saveWindowState = async () => {
+  try {
+    const { SaveCurrentWindowState } = await import('../wailsjs/go/main/App.js')
+    await SaveCurrentWindowState()
+  } catch (error) {
+    console.error('保存窗口状态失败:', error)
+  }
+}
 </script>
 
 <style scoped>
 .git-sync-container {
-  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   overflow: hidden;
-  position: relative;
-  height: 800px;
-  padding-bottom: 35px;
   background: #f5f7fa;
 }
 
@@ -321,6 +359,28 @@ onUnmounted(() => {
 
 :deep(.el-table td) {
   padding: 5px 0;
+}
+
+.git-sync-container > .el-row {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.git-sync-container > .el-row > .el-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.git-sync-container > .el-row > .el-col > .操作区 {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
 }
 
 .card-header {
@@ -359,6 +419,16 @@ onUnmounted(() => {
 
 .操作区 {
   margin: 0 0 1px 0;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.操作区 .el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
 }
 
 .操作按钮 {
@@ -366,6 +436,7 @@ onUnmounted(() => {
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .status-tag {
@@ -420,6 +491,9 @@ onUnmounted(() => {
 
 .结果区 {
   margin: 1px 0 0 0;
+  flex-shrink: 0;
+  max-height: 40%;
+  overflow: auto;
 }
 
 .text-muted {
@@ -433,12 +507,10 @@ onUnmounted(() => {
 
 /* 底部状态栏 */
 .status-bar {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  flex-shrink: 0;
   height: 32px;
-  background: #304156;
+  background: #f5f7fa;
+  border-top: 1px solid #e4e7ed;
   display: flex;
   align-items: center;
   padding: 0 12px;
@@ -448,7 +520,7 @@ onUnmounted(() => {
 .status-label {
   font-weight: bold;
   margin-right: 8px;
-  color: #fff;
+  color: #606266;
 }
 
 .status-empty {
@@ -472,7 +544,7 @@ onUnmounted(() => {
 }
 
 .status-repo {
-  color: #fff;
+  color: #303133;
   font-weight: 500;
 }
 
@@ -482,12 +554,12 @@ onUnmounted(() => {
 }
 
 .status-msg {
-  color: #b4bcc4;
+  color: #606266;
   margin-left: 6px;
 }
 
 .status-sep {
-  color: #4a5568;
+  color: #dcdfe6;
   margin: 0 10px;
 }
 </style>
