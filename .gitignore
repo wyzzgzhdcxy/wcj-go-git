@@ -1,0 +1,5 @@
+build/*
+*.exe
+.idea
+node_modules
+frontend/dist
