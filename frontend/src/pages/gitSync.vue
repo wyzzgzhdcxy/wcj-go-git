@@ -53,9 +53,9 @@
             </el-table-column>
             <el-table-column label="操作" min-width="260" align="center">
               <template #default="scope">
-                <el-button type="danger" size="small" @click="removeRepo(scope.$index)" :icon="Delete">删除</el-button>
-                <el-button type="warning" size="small" @click="resetProject(scope.row)" :loading="resetting">重置</el-button>
-                <el-button type="primary" size="small" @click="packageProject(scope.row)" :loading="scope.row.packaging">打包</el-button>
+                <el-button type="danger" size="small" @click="removeRepo(scope.$index)" :icon="Delete" :disabled="!!currentPackagingPath">删除</el-button>
+                <el-button type="warning" size="small" @click="resetProject(scope.row)" :loading="resetting" :disabled="!!currentPackagingPath">重置</el-button>
+                <el-button type="primary" size="small" @click="packageProject(scope.row)" :loading="scope.row.path === currentPackagingPath" :disabled="!!currentPackagingPath && scope.row.path !== currentPackagingPath">打包</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -129,6 +129,7 @@ const repoList = ref([])
 const syncing = ref(false)
 const packaging = ref(false)
 const resetting = ref(false)
+const currentPackagingPath = ref(null)
 const syncResults = ref([])
 const syncLogs = ref([])
 const autoSyncRunning = ref(false)
