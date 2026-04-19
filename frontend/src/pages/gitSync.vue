@@ -331,7 +331,7 @@ const resetProject = async (repo) => {
 
 // 打包项目
 const packageProject = async (repo) => {
-  repo.packaging = true
+  currentPackagingPath.value = repo.path
   try {
     const { PackageProject } = await import('../wailsjs/go/main/App.js')
     const result = await PackageProject({ path: repo.path })
@@ -344,7 +344,7 @@ const packageProject = async (repo) => {
   } catch (error) {
     ElMessage.error('打包失败: ' + error.message)
   } finally {
-    repo.packaging = false
+    currentPackagingPath.value = null
   }
 }
 
