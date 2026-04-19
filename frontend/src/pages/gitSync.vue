@@ -128,7 +128,6 @@ import { FolderAdd, Refresh, Delete, FolderOpened, Document } from '@element-plu
 const repoList = ref([])
 const syncing = ref(false)
 const packaging = ref(false)
-const resetting = ref(false)
 const currentPackagingPath = ref(null)
 const currentResettingPath = ref(null)
 const syncResults = ref([])
