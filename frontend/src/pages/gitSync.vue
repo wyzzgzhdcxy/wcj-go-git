@@ -55,7 +55,7 @@
               <template #default="scope">
                 <el-button type="danger" size="small" @click="removeRepo(scope.$index)" :icon="Delete">删除</el-button>
                 <el-button type="warning" size="small" @click="resetProject(scope.row)" :loading="resetting">重置</el-button>
-                <el-button type="primary" size="small" @click="packageProject(scope.row)" :loading="packaging">打包</el-button>
+                <el-button type="primary" size="small" @click="packageProject(scope.row)" :loading="scope.row.packaging">打包</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -330,7 +330,7 @@ const resetProject = async (repo) => {
 
 // 打包项目
 const packageProject = async (repo) => {
-  packaging.value = true
+  repo.packaging = true
   try {
     const { PackageProject } = await import('../wailsjs/go/main/App.js')
     const result = await PackageProject({ path: repo.path })
@@ -343,7 +343,7 @@ const packageProject = async (repo) => {
   } catch (error) {
     ElMessage.error('打包失败: ' + error.message)
   } finally {
-    packaging.value = false
+    repo.packaging = false
   }
 }
 
