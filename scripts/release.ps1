@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     提交并打 tag，再推送到远端，触发 GitHub 自动打包。

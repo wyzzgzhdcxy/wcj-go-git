@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     本地打包 Windows UI 程序 (Wails) 和 sync/ 下的命令行程序，统一输出到 build/bin/。
