@@ -54,10 +54,11 @@ function Get-CurrentBranch {
 }
 
 function Get-LatestTag {
-    $tag = (& git describe --tags --abbrev=0 2>$null).Trim()
+    $raw = git describe --tags --abbrev=0 2>&1
     if ($LASTEXITCODE -ne 0) { return $null }
-    if ([string]::IsNullOrWhiteSpace($tag)) { return $null }
-    return $tag
+    $clean = $raw | Where-Object { $_ -match '^v?\d+(\.\d+){1,2}$' } | Select-Object -First 1
+    if (-not $clean) { return $null }
+    return $clean.Trim()
 }
 
 # --- sanity checks ----------------------------------------------------------
@@ -106,7 +107,10 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 $Tag = "v$Version"
 Write-Host "目标版本: $Tag"
 
-if (& git rev-parse -q --verify "refs/tags/$Tag" 2>$null) {
+$exists = $false
+$verifyOut = git rev-parse -q --verify "refs/tags/$Tag" 2>&1
+if ($LASTEXITCODE -eq 0) { $exists = $true }
+if ($exists) {
     throw "tag '$Tag' 已经存在，请先删除或换一个新版本号 (git tag -d $Tag)"
 }
 
