@@ -1,0 +1,24 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Git同步工具",
+  "outputfilename": "Git同步工具",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "assetdir": "frontend/dist",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "reloaddirs": "frontend/dist",
+  "wailsjsdir": "frontend/src",
+  "author": {
+    "name": "",
+    "email": ""
+  },
+  "windows": {
+    "minWidth": 800,
+    "minHeight": 600,
+    "resizable": true,
+    "minimizable": true,
+    "maximizable": true,
+    "decor": false
+  }
+}
