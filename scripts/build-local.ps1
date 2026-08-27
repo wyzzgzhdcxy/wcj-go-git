@@ -96,7 +96,11 @@ if (-not $SkipUI) {
     }
 
     $dst = Join-Path $binDir "$uiName.exe"
-    if ($DryRun) {
+    $resolvedSrc = (Resolve-Path -LiteralPath $src).Path
+    $resolvedDst = (Resolve-Path -LiteralPath (Split-Path -Parent $dst)).Path
+    if ("$resolvedDst\`$([IO.Path]::GetFileName($dst))" -ieq $resolvedSrc) {
+        Write-Host "  (源与目标相同，跳过 copy): $dst"
+    } elseif ($DryRun) {
         Write-Host "  (DRYRUN) copy: $src -> $dst"
     } else {
         Copy-Item -LiteralPath $src -Destination $dst -Force
