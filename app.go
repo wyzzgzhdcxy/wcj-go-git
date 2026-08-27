@@ -16,7 +16,7 @@ import (
 	"sync"
 	"syscall"
 
-	"wcj-go-common/core"
+	"github.com/wyzzgzhdcxy/wcj-go-common/core"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	_ "modernc.org/sqlite"

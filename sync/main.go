@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"wcj-go-common/core"
-	myUtil "wcj-go-common/utils"
+	"github.com/wyzzgzhdcxy/wcj-go-common/core"
+	myUtil "github.com/wyzzgzhdcxy/wcj-go-common/utils"
 
 	_ "modernc.org/sqlite"
 )
