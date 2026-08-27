@@ -46,7 +46,9 @@ jobs:
       - name: Build (Windows)
         if: matrix.platform.goos == 'windows'
         shell: pwsh
-        run: wails build -platform windows/amd64 -trimpath -clean
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\wtools" | Out-Null
+          wails build -platform windows/amd64 -trimpath -clean
         env:
           GOOS: windows
           GOARCH: amd64
