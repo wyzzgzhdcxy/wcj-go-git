@@ -1,0 +1,111 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: { goos: windows, goarch: amd64 }
+            archive_ext: zip
+          - os: macos-latest
+            platform: { goos: darwin,  goarch: amd64 }
+            archive_ext: tar.gz
+          - os: macos-latest
+            platform: { goos: darwin,  goarch: arm64 }
+            archive_ext: tar.gz
+          - os: ubuntu-latest
+            platform: { goos: linux,   goarch: amd64 }
+            archive_ext: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.9.2
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Build (Windows)
+        if: matrix.platform.goos == 'windows'
+        shell: pwsh
+        run: wails build -platform windows/amd64 -trimpath -clean
+        env:
+          GOOS: windows
+          GOARCH: amd64
+
+      - name: Build (Unix)
+        if: matrix.platform.goos != 'windows'
+        shell: bash
+        run: |
+          wails build -platform ${{ matrix.platform.goos }}/${{ matrix.platform.goarch }} -trimpath -clean
+        env:
+          GOOS: ${{ matrix.platform.goos }}
+          GOARCH: ${{ matrix.platform.goarch }}
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          NAME="wcj-go-git-${{ github.ref_name }}-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}"
+          if [ "${{ matrix.platform.goos }}" = "windows" ]; then
+            cd build/bin
+            7z a "../../dist/${NAME}.zip" ./* || zip -r "../../dist/${NAME}.zip" ./*
+            cd ../..
+          else
+            tar -czf "dist/${NAME}.tar.gz" -C build/bin .
+          fi
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wcj-go-git-${{ matrix.platform.goos }}-${{ matrix.platform.goarch }}
+          path: dist/*.${{ matrix.archive_ext }}
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
