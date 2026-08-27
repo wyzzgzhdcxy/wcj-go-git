@@ -49,6 +49,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\wtools" | Out-Null
           wails build -platform windows/amd64 -trimpath -clean
+          go build -ldflags="-s -w -H windowsgui" -o build/bin/sync.exe ./sync/
         env:
           GOOS: windows
           GOARCH: amd64
