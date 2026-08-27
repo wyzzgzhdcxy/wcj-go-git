@@ -371,6 +371,36 @@ export namespace main {
 	        this.output = source["output"];
 	    }
 	}
+	export class SoftResetReq {
+	    path: string;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SoftResetReq(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.message = source["message"];
+	    }
+	}
+	export class SoftResetResult {
+	    success: boolean;
+	    message: string;
+	    output: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SoftResetResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.message = source["message"];
+	        this.output = source["output"];
+	    }
+	}
 	export class WindowState {
 	    width: number;
 	    height: number;

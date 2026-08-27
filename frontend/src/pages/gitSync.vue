@@ -51,10 +51,11 @@
                 <span v-else class="text-muted">-</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" min-width="260" align="center">
+            <el-table-column label="操作" min-width="340" align="center">
               <template #default="scope">
                 <el-button type="danger" size="small" @click="removeRepo(scope.$index)" :icon="Delete" :disabled="!!currentPackagingPath">删除</el-button>
                 <el-button type="warning" size="small" @click="resetProject(scope.row)" :loading="scope.row.path === currentResettingPath" :disabled="(!!currentPackagingPath || !!currentResettingPath) && scope.row.path !== currentResettingPath">重置</el-button>
+                <el-button type="info" size="small" @click="softReset(scope.row)" :loading="scope.row.path === currentSoftResettingPath" :disabled="(!!currentPackagingPath || !!currentResettingPath || !!currentSoftResettingPath) && scope.row.path !== currentSoftResettingPath">合并提交</el-button>
                 <el-button type="primary" size="small" @click="packageProject(scope.row)" :loading="scope.row.path === currentPackagingPath" :disabled="!!currentPackagingPath && scope.row.path !== currentPackagingPath">打包</el-button>
               </template>
             </el-table-column>
@@ -130,6 +131,7 @@ const syncing = ref(false)
 const packaging = ref(false)
 const currentPackagingPath = ref(null)
 const currentResettingPath = ref(null)
+const currentSoftResettingPath = ref(null)
 const syncResults = ref([])
 const syncLogs = ref([])
 const autoSyncRunning = ref(false)
@@ -325,6 +327,39 @@ const resetProject = async (repo) => {
     currentResettingPath.value = null
     if (error !== 'cancel') {
       ElMessage.error('重置失败: ' + error.message)
+    }
+  }
+}
+
+// 软重置：合并未推送到远程的提交
+const softReset = async (repo) => {
+  try {
+    const { SoftReset } = await import('../wailsjs/go/main/App.js')
+
+    await ElMessageBox.confirm(
+      `将本地未推送的提交合并为一次提交（基于 origin/${repo.branch || '当前分支'}，不会推送）。\n\n项目: ${repo.name}\n路径: ${repo.path}`,
+      '确认合并提交',
+      {
+        confirmButtonText: '确认',
+        cancelButtonText: '取消',
+        type: 'info',
+      }
+    )
+
+    currentSoftResettingPath.value = repo.path
+    const result = await SoftReset({ path: repo.path, message: '合并本地未推送的提交' })
+    currentSoftResettingPath.value = null
+
+    if (result.success) {
+      ElMessage.success({ message: '合并成功', duration: 0 })
+      console.log('软重置输出:', result.output)
+    } else {
+      ElMessage.error('合并失败: ' + result.message)
+    }
+  } catch (error) {
+    currentSoftResettingPath.value = null
+    if (error !== 'cancel') {
+      ElMessage.error('合并失败: ' + error.message)
     }
   }
 }

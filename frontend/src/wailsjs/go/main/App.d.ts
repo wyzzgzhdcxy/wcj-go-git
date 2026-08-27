@@ -77,6 +77,8 @@ export function SetSystemEnv(arg1:string,arg2:string):Promise<void>;
 
 export function ShowWindow():Promise<void>;
 
+export function SoftReset(arg1:main.SoftResetReq):Promise<main.SoftResetResult>;
+
 export function Startup(arg1:context.Context):Promise<void>;
 
 export function UnmaximizeWindow():Promise<void>;

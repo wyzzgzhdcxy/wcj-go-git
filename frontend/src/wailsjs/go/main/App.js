@@ -150,6 +150,10 @@ export function ShowWindow() {
   return window['go']['main']['App']['ShowWindow']();
 }
 
+export function SoftReset(arg1) {
+  return window['go']['main']['App']['SoftReset'](arg1);
+}
+
 export function Startup(arg1) {
   return window['go']['main']['App']['Startup'](arg1);
 }

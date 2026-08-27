@@ -975,6 +975,93 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	}
 }
 
+// SoftResetResult 软重置结果
+type SoftResetResult struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Output  string `json:"output"`
+}
+
+// SoftResetReq 软重置请求
+type SoftResetReq struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+// SoftReset 将未推送到远程的提交合并为一次提交
+func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
+	projectDir := req.Path
+	commitMsg := strings.TrimSpace(req.Message)
+	if commitMsg == "" {
+		commitMsg = "合并本地未推送的提交"
+	}
+	log.Printf("开始软重置, 目录: %s, 提交信息: %s", projectDir, commitMsg)
+
+	var output string
+	runGit := func(args ...string) (string, error) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = projectDir
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	branchOut, err := runGit("rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil || branchOut == "" || branchOut == "HEAD" {
+		return SoftResetResult{
+			Success: false,
+			Message: "未检测到当前分支，请确保是有效的 Git 仓库",
+			Output:  branchOut,
+		}
+	}
+	branch := branchOut
+	output += fmt.Sprintf("当前分支: %s\n", branch)
+
+	fetchOut, fetchErr := runGit("fetch", "origin", branch)
+	output += fmt.Sprintf("git fetch origin %s\n%s\n", branch, fetchOut)
+	if fetchErr != nil {
+		log.Printf("git fetch 失败: %v", fetchErr)
+	}
+
+	remoteRef := fmt.Sprintf("origin/%s", branch)
+	if existsOut, _ := runGit("rev-parse", "--verify", "--quiet", remoteRef); existsOut == "" {
+		return SoftResetResult{
+			Success: false,
+			Message: fmt.Sprintf("未找到远程分支 %s，无法软重置", remoteRef),
+			Output:  output,
+		}
+	}
+
+	resetOut, resetErr := runGit("reset", "--soft", remoteRef)
+	output += fmt.Sprintf("git reset --soft %s\n%s\n", remoteRef, resetOut)
+	if resetErr != nil {
+		log.Printf("git reset --soft 失败: %v", resetErr)
+		return SoftResetResult{
+			Success: false,
+			Message: "软重置失败，请确认本地有未推送的提交",
+			Output:  output,
+		}
+	}
+
+	commitOut, commitErr := runGit("commit", "-m", commitMsg)
+	output += fmt.Sprintf("git commit -m \"%s\"\n%s\n", commitMsg, commitOut)
+	if commitErr != nil {
+		log.Printf("git commit 失败: %v", commitErr)
+		return SoftResetResult{
+			Success: false,
+			Message: "提交失败，可能没有可提交的内容",
+			Output:  output,
+		}
+	}
+
+	log.Printf("软重置完成, 输出:\n%s", output)
+	return SoftResetResult{
+		Success: true,
+		Message: "合并成功",
+		Output:  output,
+	}
+}
+
 // PackageResult 打包结果
 type PackageResult struct {
 	Success     bool   `json:"success"`
