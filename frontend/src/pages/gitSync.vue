@@ -302,7 +302,7 @@ const resetProject = async (repo) => {
     const { ResetProject } = await import('../wailsjs/go/main/App.js')
 
     await ElMessageBox.confirm(
-      `重置项目将删除 .git 目录并重新初始化。\n\n项目: ${repo.name}\n路径: ${repo.path}\n\n将执行以下命令:\nrm -rf .git\ngit init -b <分支>\ngit add .\ngit commit -m "基本功能实现V1.0"\ngit remote add origin <远程地址>\ngit push -f -u origin <分支>`,
+      `将清空本地 Git 历史，重新初始化仓库并强制推送到远端，覆盖远程历史，不可恢复。\n\n项目: ${repo.name}\n路径: ${repo.path}`,
       '确认重置',
       {
         confirmButtonText: '确认',
