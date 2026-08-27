@@ -96,9 +96,16 @@ if (-not $SkipUI) {
     }
 
     $dst = Join-Path $binDir "$uiName.exe"
-    $resolvedSrc = (Resolve-Path -LiteralPath $src).Path
-    $resolvedDst = (Resolve-Path -LiteralPath (Split-Path -Parent $dst)).Path
-    if ("$resolvedDst\`$([IO.Path]::GetFileName($dst))" -ieq $resolvedSrc) {
+    $sameFile = $false
+    try {
+        $srcFull = (Get-Item -LiteralPath $src -ErrorAction Stop).FullName.TrimEnd('\')
+        $dstFull = $dst.TrimEnd('\')
+        if ([string]::Equals($srcFull, $dstFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $sameFile = $true
+        }
+    } catch {}
+
+    if ($sameFile) {
         Write-Host "  (源与目标相同，跳过 copy): $dst"
     } elseif ($DryRun) {
         Write-Host "  (DRYRUN) copy: $src -> $dst"
