@@ -352,12 +352,12 @@ func (a *App) GetGitRepoInfo(req GetGitRepoInfoReq) GetGitRepoInfoRes {
 	}
 
 	// 获取当前分支
-	branchOutput, _ := RunWithDirAndOutput(req.Path, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branch := strings.TrimSpace(string(branchOutput))
+	branchOutput := core.ExecuteCommandByTargetDir(req.Path, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branch := strings.TrimSpace(string(*branchOutput))
 
 	// 获取远程仓库信息
-	remoteOutput, _ := RunWithDirAndOutput(req.Path, "git", "remote", "get-url", "origin")
-	remoteUrl := strings.TrimSpace(string(remoteOutput))
+	remoteOutput := core.ExecuteCommandByTargetDir(req.Path, "git", "remote", "get-url", "origin")
+	remoteUrl := strings.TrimSpace(string(*remoteOutput))
 
 	// 获取仓库名称
 	repoName := filepath.Base(req.Path)
@@ -844,29 +844,19 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	var output string
 
 	// 使用 git 命令获取分支名
-	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = projectDir
-	setHideWindow(branchCmd)
-	branchOut, branchErr := branchCmd.CombinedOutput()
-	var branch string
-	if branchErr == nil {
-		branch = strings.TrimSpace(string(branchOut))
-	} else {
+	branchOut := core.ExecuteCommandByTargetDir(projectDir, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branch := strings.TrimSpace(string(*branchOut))
+	if branch == "" || strings.HasPrefix(branch, "fatal:") || strings.HasPrefix(branch, "error:") {
 		branch = "master"
-		log.Printf("获取分支名失败，使用默认值 master: %v", string(branchOut))
+		log.Printf("获取分支名失败，使用默认值 master: %s", branch)
 	}
 	log.Printf("检测到分支: %s", branch)
 
 	// 使用 git 命令获取远程地址
-	remoteCmd := exec.Command("git", "remote", "get-url", "origin")
-	remoteCmd.Dir = projectDir
-	setHideWindow(remoteCmd)
-	remoteOut, remoteErr := remoteCmd.CombinedOutput()
-	var remoteURL string
-	if remoteErr == nil {
-		remoteURL = strings.TrimSpace(string(remoteOut))
-	} else {
-		log.Printf("获取远程地址失败: %v, 输出: %s", remoteErr, string(remoteOut))
+	remoteOut := core.ExecuteCommandByTargetDir(projectDir, "git", "remote", "get-url", "origin")
+	remoteURL := strings.TrimSpace(string(*remoteOut))
+	if remoteURL == "" || strings.HasPrefix(remoteURL, "fatal:") || strings.HasPrefix(remoteURL, "error:") {
+		log.Printf("获取远程地址失败: %s", remoteURL)
 	}
 	log.Printf("检测到远程地址: %s", remoteURL)
 
@@ -898,58 +888,40 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	}
 
 	// 2. git init -b <branch>
-	initCmd := exec.Command("git", "init", "-b", branch)
-	initCmd.Dir = projectDir
-	setHideWindow(initCmd)
-	initOut, initErr := initCmd.CombinedOutput()
 	output += fmt.Sprintf("git init -b %s\n", branch)
-	if initErr != nil {
-		output += string(initOut) + "\n"
-		log.Printf("git init 失败: %v", initErr)
+	initOut := core.ExecuteCommandByTargetDir(projectDir, "git", "init", "-b", branch)
+	if isGitFailure(string(*initOut)) {
+		output += string(*initOut) + "\n"
 	} else {
 		output += "成功\n"
 	}
 
 	// 3. git add .
-	addCmd := exec.Command("git", "add", ".")
-	addCmd.Dir = projectDir
-	setHideWindow(addCmd)
-	addOut, addErr := addCmd.CombinedOutput()
 	output += "git add .\n"
-	if addErr != nil {
-		output += string(addOut) + "\n"
-		log.Printf("git add 失败: %v", addErr)
+	addOut := core.ExecuteCommandByTargetDir(projectDir, "git", "add", ".")
+	if isGitFailure(string(*addOut)) {
+		output += string(*addOut) + "\n"
 	} else {
 		output += "成功\n"
 	}
 
 	// 4. git commit -m "基本功能实现V1.0"
-	commitCmd := exec.Command("git", "commit", "-m", "基本功能实现V1.0")
-	commitCmd.Dir = projectDir
-	setHideWindow(commitCmd)
-	commitOut, commitErr := commitCmd.CombinedOutput()
 	output += "git commit -m \"基本功能实现V1.0\"\n"
-	if commitErr != nil {
-		output += string(commitOut) + "\n"
-		log.Printf("git commit 失败: %v", commitErr)
+	commitOut := core.ExecuteCommandByTargetDir(projectDir, "git", "commit", "-m", "基本功能实现V1.0")
+	if isGitFailure(string(*commitOut)) {
+		output += string(*commitOut) + "\n"
 	} else {
 		output += "成功\n"
 	}
 
 	// 5. git remote add origin <url>
-	remoteAddCmd := exec.Command("git", "remote", "add", "origin", remoteURL)
-	remoteAddCmd.Dir = projectDir
-	setHideWindow(remoteAddCmd)
-	_, remoteAddErr := remoteAddCmd.CombinedOutput()
 	output += fmt.Sprintf("git remote add origin %s\n", remoteURL)
-	if remoteAddErr != nil {
+	remoteAddOut := core.ExecuteCommandByTargetDir(projectDir, "git", "remote", "add", "origin", remoteURL)
+	if isGitFailure(string(*remoteAddOut)) {
 		// 可能是 remote 已存在，尝试 set-url
-		setUrlCmd := exec.Command("git", "remote", "set-url", "origin", remoteURL)
-		setUrlCmd.Dir = projectDir
-		setHideWindow(setUrlCmd)
-		setUrlOut, setUrlErr := setUrlCmd.CombinedOutput()
-		if setUrlErr != nil {
-			output += string(setUrlOut) + "\n"
+		setUrlOut := core.ExecuteCommandByTargetDir(projectDir, "git", "remote", "set-url", "origin", remoteURL)
+		if isGitFailure(string(*setUrlOut)) {
+			output += string(*setUrlOut) + "\n"
 		} else {
 			output += "成功\n"
 		}
@@ -958,14 +930,10 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	}
 
 	// 6. git push -f -u origin <branch>
-	pushCmd := exec.Command("git", "push", "-f", "-u", "origin", branch)
-	pushCmd.Dir = projectDir
-	setHideWindow(pushCmd)
-	pushOut, pushErr := pushCmd.CombinedOutput()
 	output += fmt.Sprintf("git push -f -u origin %s\n", branch)
-	if pushErr != nil {
-		output += string(pushOut) + "\n"
-		log.Printf("git push 失败: %v", pushErr)
+	pushOut := core.ExecuteCommandByTargetDir(projectDir, "git", "push", "-f", "-u", "origin", branch)
+	if isGitFailure(string(*pushOut)) {
+		output += string(*pushOut) + "\n"
 	} else {
 		output += "成功\n"
 	}
@@ -976,6 +944,12 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 		Message: "重置完成",
 		Output:  output,
 	}
+}
+
+// isGitFailure 通过输出内容判断 git 命令是否失败（common 的 ExecuteCommandByTargetDir 不返回 error）
+func isGitFailure(out string) bool {
+	s := strings.TrimSpace(out)
+	return strings.HasPrefix(s, "fatal:") || strings.HasPrefix(s, "error:") || strings.HasPrefix(s, "git: ")
 }
 
 // SoftResetResult 软重置结果
@@ -1001,16 +975,13 @@ func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
 	log.Printf("开始软重置, 目录: %s, 提交信息: %s", projectDir, commitMsg)
 
 	var output string
-	runGit := func(args ...string) (string, error) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = projectDir
-		setHideWindow(cmd)
-		out, err := cmd.CombinedOutput()
-		return strings.TrimSpace(string(out)), err
+	runGit := func(args ...string) (string, bool) {
+		out := core.ExecuteCommandByTargetDir(projectDir, "git", args...)
+		s := strings.TrimSpace(string(*out))
+		return s, isGitFailure(s)
 	}
-
-	branchOut, err := runGit("rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil || branchOut == "" || branchOut == "HEAD" {
+branchOut, branchFailed := runGit("rev-parse", "--abbrev-ref", "HEAD")
+	if branchFailed || branchOut == "" || branchOut == "HEAD" {
 		return SoftResetResult{
 			Success: false,
 			Message: "未检测到当前分支，请确保是有效的 Git 仓库",
@@ -1018,12 +989,13 @@ func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
 		}
 	}
 	branch := branchOut
+
 	output += fmt.Sprintf("当前分支: %s\n", branch)
 
-	fetchOut, fetchErr := runGit("fetch", "origin", branch)
+	fetchOut, fetchFailed := runGit("fetch", "origin", branch)
 	output += fmt.Sprintf("git fetch origin %s\n%s\n", branch, fetchOut)
-	if fetchErr != nil {
-		log.Printf("git fetch 失败: %v", fetchErr)
+	if fetchFailed {
+		log.Printf("git fetch 失败: %s", fetchOut)
 	}
 
 	remoteRef := fmt.Sprintf("origin/%s", branch)
@@ -1035,10 +1007,10 @@ func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
 		}
 	}
 
-	resetOut, resetErr := runGit("reset", "--soft", remoteRef)
+	resetOut, resetFailed := runGit("reset", "--soft", remoteRef)
 	output += fmt.Sprintf("git reset --soft %s\n%s\n", remoteRef, resetOut)
-	if resetErr != nil {
-		log.Printf("git reset --soft 失败: %v", resetErr)
+	if resetFailed {
+		log.Printf("git reset --soft 失败: %s", resetOut)
 		return SoftResetResult{
 			Success: false,
 			Message: "软重置失败，请确认本地有未推送的提交",
@@ -1046,10 +1018,10 @@ func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
 		}
 	}
 
-	commitOut, commitErr := runGit("commit", "-m", commitMsg)
+	commitOut, commitFailed := runGit("commit", "-m", commitMsg)
 	output += fmt.Sprintf("git commit -m \"%s\"\n%s\n", commitMsg, commitOut)
-	if commitErr != nil {
-		log.Printf("git commit 失败: %v", commitErr)
+	if commitFailed {
+		log.Printf("git commit 失败: %s", commitOut)
 		return SoftResetResult{
 			Success: false,
 			Message: "提交失败，可能没有可提交的内容",
@@ -1095,24 +1067,16 @@ func (a *App) PackageProject(req PackageReq) PackageResult {
 		}
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("wails", "build")
-	cmd.Dir = projectDir
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	setHideWindow(cmd)
-
 	log.Printf("执行命令: wails build, 工作目录: %s", projectDir)
-	err := cmd.Run()
-
-	output := stdout.String() + stderr.String()
+	outputBytes := core.ExecuteCommandByTargetDir(projectDir, "wails", "build")
+	output := string(*outputBytes)
 	log.Printf("打包输出:\n%s", output)
 
-	if err != nil {
-		log.Printf("打包失败: %v", err)
+	if strings.Contains(output, "ERROR") || strings.Contains(output, "Error:") {
+		log.Printf("打包失败: %s", output)
 		return PackageResult{
 			Success:   false,
-			Message:   "打包失败: " + err.Error(),
+			Message:   "打包失败",
 			Output:    output,
 			OutputDir: "",
 		}
