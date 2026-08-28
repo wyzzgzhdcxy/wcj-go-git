@@ -64,6 +64,7 @@ jobs:
         if: matrix.platform.goos != 'windows'
         shell: bash
         run: |
+          mkdir -p "$HOME/Library/Caches/wtools"
           wails build -platform ${{ matrix.platform.goos }}/${{ matrix.platform.goarch }} -trimpath -clean
         env:
           GOOS: ${{ matrix.platform.goos }}
