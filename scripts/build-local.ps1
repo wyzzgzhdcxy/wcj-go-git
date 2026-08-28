@@ -23,6 +23,8 @@ param(
     [switch]$SkipUI,
     [switch]$SkipCLI,
     [string]$OutputDir = "build\bin",
+    [string]$DeployDir = "E:\application\我的工具箱",
+    [switch]$NoDeploy,
     [switch]$DryRun
 )
 
@@ -132,7 +134,7 @@ if (-not $SkipCLI) {
             $env:GOOS   = "windows"
             $env:GOARCH = "amd64"
             $env:CGO_ENABLED = "0"
-            & go build -trimpath -ldflags "-s -w" -o $cliOut .
+            & go build -trimpath -ldflags "-s -w -H windowsgui" -o $cliOut .
             if ($LASTEXITCODE -ne 0) { throw "go build sync 失败 (exit=$LASTEXITCODE)" }
         } finally {
             Pop-Location
@@ -141,6 +143,27 @@ if (-not $SkipCLI) {
     }
 } else {
     Write-Warn "[2/2] 已跳过 sync CLI"
+}
+
+# --- deploy ------------------------------------------------------------------
+if (-not $SkipUI -and -not $NoDeploy) {
+    Write-Step "[3/3] 部署 UI 程序到: $DeployDir"
+    $srcUi = Join-Path $binDir "$uiName.exe"
+    if (-not (Test-Path -LiteralPath $srcUi)) {
+        Write-Warn "  未找到 $srcUi，跳过部署"
+    } else {
+        if ($DryRun) {
+            Write-Host "  (DRYRUN) copy: $srcUi -> $DeployDir"
+        } else {
+            if (-not (Test-Path -LiteralPath $DeployDir)) {
+                New-Item -ItemType Directory -Path $DeployDir -Force | Out-Null
+            }
+            Copy-Item -LiteralPath $srcUi -Destination (Join-Path $DeployDir "$uiName.exe") -Force
+            Write-Ok "  ✓ 已部署: $(Join-Path $DeployDir "$uiName.exe")"
+        }
+    }
+} elseif ($NoDeploy) {
+    Write-Warn "[3/3] 已跳过部署 (-NoDeploy)"
 }
 
 # --- summary -----------------------------------------------------------------

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"log"
 	"path/filepath"
 	"syscall"
@@ -54,6 +55,7 @@ var assets embed.FS
 var appCtx context.Context
 
 func main() {
+	processStart := time.Now()
 	myUtil.InitLog(true)
 
 	startSt := time.Now().Format("2006-01-02 15:04:05.000")
@@ -108,8 +110,10 @@ func main() {
 	log.Printf("[DEBUG] 最终使用的窗口尺寸: %dx%d, 位置: %d,%d", width, height, ws.X, ws.Y)
 
 	// Create application with options
+	preRunElapsed := time.Since(processStart)
+	title := "Git同步工具 - " + dbPath + fmt.Sprintf(" (启动耗时: %dms)", preRunElapsed.Milliseconds())
 	err := wails.Run(&options.App{
-		Title:             "Git同步工具 - " + dbPath,
+		Title:             title,
 		Width:             width,
 		DisableResize:     false,
 		Height:            height,
@@ -127,6 +131,9 @@ func main() {
 		OnStartup: func(ctx context.Context) {
 			appCtx = ctx
 			application.Startup(ctx)
+			// 启动完成后更新标题，显示完整启动耗时（含 WebView/前端）
+			fullElapsed := time.Since(processStart)
+			runtime.WindowSetTitle(ctx, fmt.Sprintf("Git同步工具 - %s (启动耗时: %dms)", dbPath, fullElapsed.Milliseconds()))
 			// 如果有保存的窗口位置，应用它
 			if ws.X > 0 || ws.Y > 0 {
 				runtime.WindowSetPosition(ctx, ws.X, ws.Y)
