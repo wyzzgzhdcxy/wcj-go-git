@@ -40,7 +40,7 @@ func main() {
 	log.Printf("%s", "db init finish! "+time.Now().Format("2006-01-02 15:04:05.000"))
 
 	// 默认窗口尺寸（宽度=800，高度=屏幕高-200）
-	screenWidth, screenHeight := getScreenSize()
+	screenWidth, screenHeight := core.GetScreenSize()
 	defaultWidth := 820
 	defaultHeight := 700
 	// 最大尺寸限制

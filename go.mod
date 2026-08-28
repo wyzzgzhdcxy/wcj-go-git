@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	github.com/wailsapp/wails/v2 v2.15.0
-	github.com/wyzzgzhdcxy/wcj-go-common v0.0.0-20260828095623-5e1a8aab058a
+	github.com/wyzzgzhdcxy/wcj-go-common v0.0.0-20260828101448-ca6a9945db74
 	modernc.org/sqlite v1.34.0
 )
 
