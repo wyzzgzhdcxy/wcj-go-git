@@ -19,9 +19,6 @@ jobs:
           - os: windows-latest
             platform: { goos: windows, goarch: amd64 }
             archive_ext: zip
-          - os: macos-13
-            platform: { goos: darwin, goarch: amd64 }
-            archive_ext: tar.gz
           - os: macos-14
             platform: { goos: darwin, goarch: arm64 }
             archive_ext: tar.gz
