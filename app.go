@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/wyzzgzhdcxy/wcj-go-common/core"
 
@@ -846,7 +847,7 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 使用 git 命令获取分支名
 	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	branchCmd.Dir = projectDir
-	setHideWindow(branchCmd)
+	branchCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	branchOut, branchErr := branchCmd.CombinedOutput()
 	var branch string
 	if branchErr == nil {
@@ -860,7 +861,7 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 使用 git 命令获取远程地址
 	remoteCmd := exec.Command("git", "remote", "get-url", "origin")
 	remoteCmd.Dir = projectDir
-	setHideWindow(remoteCmd)
+	remoteCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	remoteOut, remoteErr := remoteCmd.CombinedOutput()
 	var remoteURL string
 	if remoteErr == nil {
@@ -900,7 +901,7 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 2. git init -b <branch>
 	initCmd := exec.Command("git", "init", "-b", branch)
 	initCmd.Dir = projectDir
-	setHideWindow(initCmd)
+	initCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	initOut, initErr := initCmd.CombinedOutput()
 	output += fmt.Sprintf("git init -b %s\n", branch)
 	if initErr != nil {
@@ -913,7 +914,7 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 3. git add .
 	addCmd := exec.Command("git", "add", ".")
 	addCmd.Dir = projectDir
-	setHideWindow(addCmd)
+	addCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	addOut, addErr := addCmd.CombinedOutput()
 	output += "git add .\n"
 	if addErr != nil {
@@ -926,7 +927,7 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 4. git commit -m "基本功能实现V1.0"
 	commitCmd := exec.Command("git", "commit", "-m", "基本功能实现V1.0")
 	commitCmd.Dir = projectDir
-	setHideWindow(commitCmd)
+	commitCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	commitOut, commitErr := commitCmd.CombinedOutput()
 	output += "git commit -m \"基本功能实现V1.0\"\n"
 	if commitErr != nil {
@@ -939,14 +940,14 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 5. git remote add origin <url>
 	remoteAddCmd := exec.Command("git", "remote", "add", "origin", remoteURL)
 	remoteAddCmd.Dir = projectDir
-	setHideWindow(remoteAddCmd)
+	remoteAddCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_, remoteAddErr := remoteAddCmd.CombinedOutput()
 	output += fmt.Sprintf("git remote add origin %s\n", remoteURL)
 	if remoteAddErr != nil {
 		// 可能是 remote 已存在，尝试 set-url
 		setUrlCmd := exec.Command("git", "remote", "set-url", "origin", remoteURL)
 		setUrlCmd.Dir = projectDir
-		setHideWindow(setUrlCmd)
+		setUrlCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		setUrlOut, setUrlErr := setUrlCmd.CombinedOutput()
 		if setUrlErr != nil {
 			output += string(setUrlOut) + "\n"
@@ -960,7 +961,7 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	// 6. git push -f -u origin <branch>
 	pushCmd := exec.Command("git", "push", "-f", "-u", "origin", branch)
 	pushCmd.Dir = projectDir
-	setHideWindow(pushCmd)
+	pushCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	pushOut, pushErr := pushCmd.CombinedOutput()
 	output += fmt.Sprintf("git push -f -u origin %s\n", branch)
 	if pushErr != nil {
@@ -1004,7 +1005,7 @@ func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
 	runGit := func(args ...string) (string, error) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = projectDir
-		setHideWindow(cmd)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}
@@ -1100,7 +1101,7 @@ func (a *App) PackageProject(req PackageReq) PackageResult {
 	cmd.Dir = projectDir
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	setHideWindow(cmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	log.Printf("执行命令: wails build, 工作目录: %s", projectDir)
 	err := cmd.Run()
@@ -1144,7 +1145,7 @@ func (a *App) PackageProject(req PackageReq) PackageResult {
 	}
 
 	// 复制到目标目录
-	targetDir := getPackageTargetDir()
+	targetDir := "E:\\application\\我的工具箱"
 	targetPath := filepath.Join(targetDir, exeFile)
 
 	// 确保目标目录存在
