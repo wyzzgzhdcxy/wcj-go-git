@@ -20,6 +20,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// initGitSsh 设置 git 使用的 SSH 私钥路径，供 core.ExecuteCommandByTargetDir 调用
+func initGitSsh() {
+	os.Setenv("GIT_SSH_COMMAND", "ssh -i "+getRsaPrivateKeyPath())
+}
+
 // GitRepo Git仓库信息
 type GitRepo struct {
 	Path         string `json:"path"`
@@ -69,6 +74,7 @@ func main() {
 	myUtil.InitLog(true)
 	startSt := time.Now().Format("2006-01-02 15:04:05.000")
 	core.MkDirALl0755(filepath.Join(core.GetTempDir(), "/codeGen"))
+	initGitSsh()
 	log.Printf("%s", startSt+" log init finish! "+time.Now().Format("2006-01-02 15:04:05.000"))
 
 	// 初始化数据库
@@ -329,14 +335,17 @@ func gitSync(repo GitRepo) []GitSyncResult {
 	return results
 }
 
+// runWithDirAndOutput 在指定目录下执行命令并返回合并输出与错误。
+// Windows 下隐藏控制台窗口（与 common/core.ExecuteCommandByTargetDir 的内部处理对齐）。
+// GIT_SSH_COMMAND 由 initGitSsh 在启动时通过 os.Setenv 设置。
 func runWithDirAndOutput(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_SSH_COMMAND=ssh -i "+getRsaPrivateKeyPath())
-	// Windows 下隐藏命令行窗口
-	setHideWindow(cmd)
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	}
 	output, err := cmd.CombinedOutput()
-	return string(output), err
+	return strings.TrimSpace(string(output)), err
 }
 
 func getRsaPrivateKeyPath() string {
