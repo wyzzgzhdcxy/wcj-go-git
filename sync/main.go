@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// initGitSsh 设置 git 使用的 SSH 私钥路径，供 core.ExecuteCommandByTargetDir 调用
+// initGitSsh 设置 git 使用的 SSH 私钥路径
 func initGitSsh() {
 	os.Setenv("GIT_SSH_COMMAND", "ssh -i "+getRsaPrivateKeyPath())
 }
