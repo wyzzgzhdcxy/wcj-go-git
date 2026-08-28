@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"syscall"
 )
 
 // Options holds configuration for command execution
@@ -84,7 +83,7 @@ func createCommand(name string, args []string, opts Options) *exec.Cmd {
 
 	// Hide window on Windows if requested
 	if runtime.GOOS == "windows" && opts.HideWindow {
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		setHideWindow(cmd)
 	}
 
 	return cmd
@@ -159,7 +158,7 @@ func RunWithDirAndOutput(dir, name string, args ...string) (string, error) {
 
 func GetRsaPrivateKeyPath() string {
 	userDir, _ := os.UserHomeDir()
-	return userDir + "\\.ssh\\id_rsa"
+	return filepath.Join(userDir, ".ssh", "id_rsa")
 }
 
 // GitClone 克隆仓库（使用命令行 git）

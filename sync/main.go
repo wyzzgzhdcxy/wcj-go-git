@@ -59,7 +59,7 @@ type GitSyncLog struct {
 	PushLog   string
 }
 
-// autoSyncTicker 自动同步定时器
+// autoSyncTicker 自动同步定时�?
 var autoSyncTicker *time.Ticker
 var autoSyncRunning bool
 var reposCache []GitRepo
@@ -84,7 +84,7 @@ func main() {
 	// 启动自动同步
 	startAutoSync(db)
 
-	// 启动 HTTP 更新接口（阻塞主线程）
+	// 启动 HTTP 更新接口（阻塞主线程�?
 	startHttpServer(db)
 }
 
@@ -99,7 +99,7 @@ func startHttpServer(db *sql.DB) {
 		reposMu.Lock()
 		reposCache = repos
 		reposMu.Unlock()
-		log.Printf("收到刷新请求，已更新缓存，共 %d 个仓库", len(repos))
+		log.Printf("收到刷新请求，已更新缓存，共 %d 个仓�?, len(repos))
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK: %d repos refreshed", len(repos))
 	})
@@ -110,7 +110,7 @@ func startHttpServer(db *sql.DB) {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// 从缓存获取仓库列表进行同步
+		// 从缓存获取仓库列表进行同�?
 		reposMu.RLock()
 		repos := reposCache
 		reposMu.RUnlock()
@@ -121,15 +121,15 @@ func startHttpServer(db *sql.DB) {
 		fmt.Fprintf(w, "OK: %d repos synced", len(repos))
 	})
 
-	// 信号处理，优雅退出
+	// 信号处理，优雅退�?
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Println("HTTP 接口已启动: http://localhost:9090")
+	log.Println("HTTP 接口已启�? http://localhost:9090")
 
 	go func() {
 		if err := http.ListenAndServe(":9090", nil); err != nil {
-			log.Printf("HTTP 服务器退出: %v", err)
+			log.Printf("HTTP 服务器退�? %v", err)
 		}
 	}()
 
@@ -144,16 +144,16 @@ func startHttpServer(db *sql.DB) {
 func initDb() (*sql.DB, error) {
 	dbPath := core.GetTempDir() + "/data/sync_list.db"
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		return nil, fmt.Errorf("创建数据库目录失败: %v", err)
+		return nil, fmt.Errorf("创建数据库目录失�? %v", err)
 	}
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("打开数据库失败: %v", err)
+		return nil, fmt.Errorf("打开数据库失�? %v", err)
 	}
 
 	if err = db.Ping(); err != nil {
-		return nil, fmt.Errorf("数据库连接失败: %v", err)
+		return nil, fmt.Errorf("数据库连接失�? %v", err)
 	}
 
 	return db, nil
@@ -187,7 +187,7 @@ func loadEnabledRepos(db *sql.DB) []GitRepo {
 
 func startAutoSync(db *sql.DB) {
 	if autoSyncRunning {
-		log.Println("自动同步已在运行中")
+		log.Println("自动同步已在运行�?)
 		return
 	}
 
@@ -241,7 +241,7 @@ func gitSync(repo GitRepo) []GitSyncResult {
 			Path:    repo.Path,
 			Name:    repo.Name,
 			Success: false,
-			Message: "目录不存在",
+			Message: "目录不存�?,
 		})
 		return results
 	}
@@ -277,7 +277,7 @@ func gitSync(repo GitRepo) []GitSyncResult {
 		result.CommitLog += "\n没有需要提交的更改"
 	}
 
-	// 如果是仅提交模式，跳过
+	// 如果是仅提交模式，跳�?
 	if repo.CommitOnly {
 		result.Success = true
 		result.Message = "同步完成"
@@ -296,7 +296,7 @@ func gitSync(repo GitRepo) []GitSyncResult {
 		return results
 	}
 
-	// 检查是否需要推送
+	// 检查是否需要推�?
 	shouldPush := result.Committed
 	if !shouldPush {
 		pushStatusOutput, _ := runWithDirAndOutput(repo.Path, "git", "status", "--porcelain")
@@ -313,7 +313,7 @@ func gitSync(repo GitRepo) []GitSyncResult {
 		if pushErr != nil {
 			result.PushLog += "\n错误: " + pushErr.Error()
 			result.Success = false
-			result.Message = "推送失败"
+			result.Message = "推送失�?
 			results = append(results, result)
 			return results
 		}
@@ -334,14 +334,14 @@ func runWithDirAndOutput(dir, name string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_SSH_COMMAND=ssh -i "+getRsaPrivateKeyPath())
 	// Windows 下隐藏命令行窗口
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	setHideWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
 
 func getRsaPrivateKeyPath() string {
 	userDir, _ := os.UserHomeDir()
-	return userDir + "\\.ssh\\id_rsa"
+	return filepath.Join(userDir, ".ssh", "id_rsa")
 }
 
 func saveSyncLog(db *sql.DB, logEntry GitSyncLog) {
@@ -363,5 +363,5 @@ func updateRepoLastSyncTime(db *sql.DB, repo GitRepo) {
 		return
 	}
 	rowsAffected, _ := result.RowsAffected()
-	log.Printf("更新仓库 %s 的同步时间: %s, 影响行数: %d", repo.Name, repo.LastSyncTime, rowsAffected)
+	log.Printf("更新仓库 %s 的同步时�? %s, 影响行数: %d", repo.Name, repo.LastSyncTime, rowsAffected)
 }
