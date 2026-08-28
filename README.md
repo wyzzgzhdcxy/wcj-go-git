@@ -114,7 +114,7 @@ wcj-go-git/
 │       │   └── gitSync.vue    # 主界面（Vue 3 + Element Plus）
 │       └── wailsjs/           # Wails 生成的 JS 绑定
 ├── sync/
-│   └── main.go         # 后台同步服务（HTTP 服务在 9090 端口）
+│   └── main.go         # 后台同步服务（HTTP 服务在 19090 端口）
 ├── wails.json           # Wails 配置
 └── go.mod               # Go 模块定义
 ```

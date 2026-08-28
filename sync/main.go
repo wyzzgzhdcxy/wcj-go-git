@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -130,15 +131,21 @@ func startHttpServer(db *sql.DB) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Println("HTTP 接口已启动: http://localhost:9090")
+	const port = ":19090"
+	ln, lnErr := net.Listen("tcp", port)
+	if lnErr != nil {
+		log.Fatalf("HTTP 服务器启动失败，端口 %s 不可用: %v", port, lnErr)
+	}
+	log.Printf("HTTP 接口已启动: http://localhost%s", port)
 
 	go func() {
-		if err := http.ListenAndServe(":9090", nil); err != nil {
+		if err := http.Serve(ln, nil); err != nil {
 			log.Printf("HTTP 服务器退出: %v", err)
 		}
 	}()
 
 	<-quit
+	_ = ln.Close()
 	log.Println("收到退出信号，正在停止...")
 	if autoSyncTicker != nil {
 		autoSyncTicker.Stop()

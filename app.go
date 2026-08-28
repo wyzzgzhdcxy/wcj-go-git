@@ -289,7 +289,7 @@ type GitSyncRes struct {
 
 // GitSync 同步Git仓库（调用后台服务）
 func (a *App) GitSync(req GitSyncReq) GitSyncRes {
-	resp, err := http.Post("http://localhost:9090/sync", "application/json", nil)
+	resp, err := http.Post("http://localhost:19090/sync", "application/json", nil)
 	if err != nil {
 		return GitSyncRes{
 			Success: false,
@@ -813,7 +813,7 @@ func (a *App) IsWindowMaximized() bool {
 
 // notifySyncRefresh 通知 sync 服务刷新缓存
 func notifySyncRefresh() {
-	resp, err := http.Post("http://localhost:9090/refresh", "application/json", nil)
+	resp, err := http.Post("http://localhost:19090/refresh", "application/json", nil)
 	if err != nil {
 		log.Printf("通知 sync 刷新失败: %v", err)
 		return
