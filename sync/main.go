@@ -6,10 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -254,26 +252,26 @@ func gitSync(repo GitRepo) []GitSyncResult {
 	}
 
 	// git add .
-	addOutput, addErr := runWithDirAndOutput(repo.Path, "git", "add", "-A")
+	addOutput, addFailed := runWithDirAndOutput(repo.Path, "git", "add", "-A")
 	result := GitSyncResult{
 		Path:      repo.Path,
 		Name:      repo.Name,
-		CommitLog: string(addOutput),
+		CommitLog: addOutput,
 	}
-	if addErr != nil {
-		result.CommitLog += "\n错误: " + addErr.Error()
+	if addFailed {
+		result.CommitLog += "\n错误: " + addOutput
 	}
 
 	// 检查是否有需要提交的更改
 	statusOutput, _ := runWithDirAndOutput(repo.Path, "git", "status", "--porcelain")
-	hasChanges := len(strings.TrimSpace(string(statusOutput))) > 0
+	hasChanges := len(strings.TrimSpace(statusOutput)) > 0
 
 	if hasChanges {
 		commitMsg := fmt.Sprintf("Sync: %s", time.Now().Format("2006-01-02 15:04:05"))
-		commitOutput, commitErr := runWithDirAndOutput(repo.Path, "git", "commit", "-m", commitMsg)
-		result.CommitLog += "\n" + string(commitOutput)
-		if commitErr != nil {
-			result.CommitLog += "\n错误: " + commitErr.Error()
+		commitOutput, commitFailed := runWithDirAndOutput(repo.Path, "git", "commit", "-m", commitMsg)
+		result.CommitLog += "\n" + commitOutput
+		if commitFailed {
+			result.CommitLog += "\n错误: " + commitOutput
 			result.Success = false
 			result.Message = "提交失败"
 			results = append(results, result)
@@ -293,10 +291,10 @@ func gitSync(repo GitRepo) []GitSyncResult {
 	}
 
 	// git pull
-	pullOutput, pullErr := runWithDirAndOutput(repo.Path, "git", "pull", repo.Remote, repo.Branch)
-	result.PullLog = string(pullOutput)
-	if pullErr != nil {
-		result.PullLog += "\n错误: " + pullErr.Error()
+	pullOutput, pullFailed := runWithDirAndOutput(repo.Path, "git", "pull", repo.Remote, repo.Branch)
+	result.PullLog = pullOutput
+	if pullFailed {
+		result.PullLog += "\n错误: " + pullOutput
 		result.Success = false
 		result.Message = "拉取失败"
 		results = append(results, result)
@@ -307,18 +305,18 @@ func gitSync(repo GitRepo) []GitSyncResult {
 	shouldPush := result.Committed
 	if !shouldPush {
 		pushStatusOutput, _ := runWithDirAndOutput(repo.Path, "git", "status", "--porcelain")
-		shouldPush = len(strings.TrimSpace(string(pushStatusOutput))) > 0
+		shouldPush = len(strings.TrimSpace(pushStatusOutput)) > 0
 	}
 	if !shouldPush {
 		statusFullOutput, _ := runWithDirAndOutput(repo.Path, "git", "status")
-		shouldPush = strings.Contains(string(statusFullOutput), "Your branch is ahead")
+		shouldPush = strings.Contains(statusFullOutput, "Your branch is ahead")
 	}
 
 	if shouldPush {
-		pushOutput, pushErr := runWithDirAndOutput(repo.Path, "git", "push", repo.Remote, repo.Branch)
-		result.PushLog = string(pushOutput)
-		if pushErr != nil {
-			result.PushLog += "\n错误: " + pushErr.Error()
+		pushOutput, pushFailed := runWithDirAndOutput(repo.Path, "git", "push", repo.Remote, repo.Branch)
+		result.PushLog = pushOutput
+		if pushFailed {
+			result.PushLog += "\n错误: " + pushOutput
 			result.Success = false
 			result.Message = "推送失败"
 			results = append(results, result)
@@ -336,17 +334,18 @@ func gitSync(repo GitRepo) []GitSyncResult {
 	return results
 }
 
-// runWithDirAndOutput 在指定目录下执行命令并返回合并输出与错误。
-// Windows 下隐藏控制台窗口（与 common/core.ExecuteCommandByTargetDir 的内部处理对齐）。
+// runWithDirAndOutput 在指定目录下执行命令并返回合并输出与是否失败。
+// 基于 common/core.ExecuteCommandByTargetDir（已处理 dir 与 Windows 隐藏窗口）。
 // GIT_SSH_COMMAND 由 initGitSsh 在启动时通过 os.Setenv 设置。
-func runWithDirAndOutput(dir, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	}
-	output, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(output)), err
+func runWithDirAndOutput(dir, name string, args ...string) (string, bool) {
+	out := core.ExecuteCommandByTargetDir(dir, name, args...)
+	s := strings.TrimSpace(string(*out))
+	return s, isGitFailure(s)
+}
+
+// isGitFailure 通过输出内容判断 git 命令是否失败（common 的 ExecuteCommandByTargetDir 不返回 error）
+func isGitFailure(out string) bool {
+	return strings.HasPrefix(out, "fatal:") || strings.HasPrefix(out, "error:") || strings.HasPrefix(out, "git: ")
 }
 
 func getRsaPrivateKeyPath() string {
