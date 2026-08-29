@@ -46,9 +46,14 @@
                 </el-tooltip>
               </template>
             </el-table-column>
-            <el-table-column label="自动同步" width="100" align="center">
+            <el-table-column label="自动同步" width="140" align="center">
               <template #default="scope">
-                <el-switch v-model="scope.row.autoSync" :disabled="!scope.row.enabled" @change="(val) => toggleAutoSync(scope.row, val)" />
+                <div class="autosync-cell">
+                  <el-switch v-model="scope.row.autoSync" :disabled="!scope.row.enabled" @change="(val) => toggleAutoSync(scope.row, val)" />
+                  <el-select v-if="scope.row.autoSync" v-model="scope.row.interval" size="small" class="interval-select" @change="saveRepos">
+                    <el-option v-for="opt in intervalOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+                  </el-select>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="启用" width="70" align="center">
@@ -136,8 +141,8 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderAdd, Refresh, Delete, FolderOpened, Document, Search } from '@element-plus/icons-vue'
+import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime.js'
 
 const repoList = ref([])
 const syncing = ref(false)
@@ -149,9 +154,22 @@ const syncResults = ref([])
 const syncLogs = ref([])
 const searchKeyword = ref('')
 const statusFilter = ref('all')
-let refreshTimer = null
 
-// 最新4条同步记录
+// 自动同步间隔选项（分钟），0 = 每次轮询（每分钟）
+const intervalOptions = [
+  { label: '每分钟', value: 0 },
+  { label: '5 分钟', value: 5 },
+  { label: '10 分钟', value: 10 },
+  { label: '15 分钟', value: 15 },
+  { label: '30 分钟', value: 30 },
+  { label: '1 小时', value: 60 },
+  { label: '2 小时', value: 120 },
+  { label: '6 小时', value: 360 },
+  { label: '12 小时', value: 720 },
+  { label: '每天', value: 1440 },
+]
+
+// 底部状态栏展示的最新几条同步记录
 const latestLogs = computed(() => syncLogs.value.slice(0, 3))
 
 // 格式化时间
@@ -249,23 +267,16 @@ const loadSyncLogs = async () => {
   }
 }
 
-// 启动自动刷新日志和仓库列表
-const startAutoRefresh = () => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-  }
-  refreshTimer = setInterval(() => {
-    loadSyncLogs()
-    loadRepos()
-  }, 3000)
-}
-
-// 停止自动刷新
-const stopAutoRefresh = () => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+// 订阅后端推送：数据库变化时由后端 EventsEmit 推送日志和仓库列表（取代前端 3 秒轮询）
+const subscribeBackendEvents = () => {
+  EventsOn('sync:logs', (logs) => {
+    syncLogs.value = logs || []
+  })
+  EventsOn('git:repos', (repos) => {
+    if (Array.isArray(repos)) {
+      repoList.value = repos
+    }
+  })
 }
 
 // 选择文件夹
@@ -457,24 +468,6 @@ const packageProject = async (repo) => {
   }
 }
 
-onMounted(() => {
-  loadRepos()
-  loadSyncLogs()
-  startAutoRefresh()
-
-  // 窗口尺寸变化时保存状态
-  window.addEventListener('resize', saveWindowState)
-  window.addEventListener('move', saveWindowState)
-  window.addEventListener('beforeunload', saveWindowState)
-})
-
-onUnmounted(() => {
-  stopAutoRefresh()
-  window.removeEventListener('resize', saveWindowState)
-  window.removeEventListener('move', saveWindowState)
-  window.removeEventListener('beforeunload', saveWindowState)
-})
-
 // 保存窗口状态
 const saveWindowState = async () => {
   try {
@@ -484,6 +477,30 @@ const saveWindowState = async () => {
     console.error('保存窗口状态失败:', error)
   }
 }
+
+// 拖拽调整窗口大小时 resize 事件高频触发，每次都写库开销太大，加 300ms 防抖
+let resizeTimer = null
+const debouncedSaveWindowState = () => {
+  if (resizeTimer) clearTimeout(resizeTimer)
+  resizeTimer = setTimeout(saveWindowState, 300)
+}
+
+onMounted(() => {
+  loadRepos()
+  loadSyncLogs()
+  subscribeBackendEvents()
+
+  // 窗口尺寸变化时保存状态（WebView 没有窗口 move 事件，位置改由后端 OnBeforeClose 兜底保存）
+  window.addEventListener('resize', debouncedSaveWindowState)
+  window.addEventListener('beforeunload', saveWindowState)
+})
+
+onUnmounted(() => {
+  EventsOff('sync:logs', 'git:repos')
+  if (resizeTimer) clearTimeout(resizeTimer)
+  window.removeEventListener('resize', debouncedSaveWindowState)
+  window.removeEventListener('beforeunload', saveWindowState)
+})
 </script>
 
 <style scoped>
@@ -618,6 +635,18 @@ const saveWindowState = async () => {
   font-weight: 500;
   color: #303133;
   vertical-align: middle;
+}
+
+/* 自动同步列：开关 + 间隔选择器纵向排列 */
+.autosync-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.interval-select {
+  width: 104px;
 }
 
 :deep(.el-card__header) {

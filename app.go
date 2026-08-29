@@ -2,30 +2,31 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
+	"time"
+
+	"wcj-go-git/gitcmd"
+	"wcj-go-git/types"
 
 	"github.com/wyzzgzhdcxy/wcj-go-common/core"
+	myUtil "github.com/wyzzgzhdcxy/wcj-go-common/utils"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	_ "modernc.org/sqlite"
 )
 
-// App struct
+// App struct（界面进程不访问数据库：领域数据全部经 HTTP 代理到后台 sync 服务，
+// 窗口状态等 UI 状态保存在本地 JSON 文件）
 type App struct {
-	ctx         context.Context
-	SettingsDb  *sql.DB // 配置存储的 sqlite 数据库
-	ProjectName string
-	Assets      embed.FS
-	mu          sync.Mutex
+	ctx    context.Context
+	Assets embed.FS
 }
 
 // NewApp creates a new App application instance
@@ -39,142 +40,115 @@ func NewApp(assets embed.FS) *App {
 func (a *App) Startup(ctx context.Context) {
 	log.Printf("Startup 被调用")
 	a.ctx = ctx
+	// 启动数据变化监听，把同步日志/仓库列表的变化以事件推送给前端（取代前端定时轮询）
+	a.StartChangeWatcher(ctx)
 }
 
-// shutdown is called when the application is about to quit
-func (a *App) Shutdown(ctx context.Context) {
-	// 关闭数据库
-	if a.SettingsDb != nil {
-		a.SettingsDb.Close()
+// ==================== 后台服务访问 ====================
+
+// svcBaseAddr 后台 sync 服务地址（仅监听本机回环）
+const svcBaseAddr = "http://127.0.0.1:19090"
+
+// svcPost 调用后台服务接口；服务未监听时先尝试自动启动再重试一次。
+// 所有接口都返回非空 JSON，空串即代表调用失败。
+func svcPost(path string, reqBody string) (string, error) {
+	body := myUtil.HttpPostJson(svcBaseAddr+path, reqBody)
+	if body != "" {
+		return body, nil
 	}
+	ensureSyncService()
+	body = myUtil.HttpPostJson(svcBaseAddr+path, reqBody)
+	if body == "" {
+		return "", fmt.Errorf("同步服务未响应，请确认 sync 服务已启动")
+	}
+	return body, nil
 }
 
-// InitSettingsDb 初始化配置数据库（sqlite）
-func (a *App) InitSettingsDb() error {
-	dbPath := core.GetTempDir() + "/data/sync_list.db"
-	// 确保目录存在
-	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		return fmt.Errorf("创建数据库目录失败: %v", err)
+// ensureSyncService 确保后台同步服务已启动：服务未监听时尝试启动同目录下的 sync.exe
+func ensureSyncService() {
+	const syncAddr = "127.0.0.1:19090"
+	if conn, err := net.DialTimeout("tcp", syncAddr, 300*time.Millisecond); err == nil {
+		conn.Close()
+		return
 	}
 
-	// 使用 database/sql + sqlite3 驱动
-	db, err := sql.Open("sqlite", dbPath)
+	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("打开数据库失败: %v", err)
+		return
+	}
+	syncExe := filepath.Join(filepath.Dir(exePath), "sync.exe")
+	if _, err := os.Stat(syncExe); err != nil {
+		log.Printf("未找到同步服务 %s，跳过自动启动", syncExe)
+		return
 	}
 
-	// 创建配置表
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS settings (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			key TEXT NOT NULL UNIQUE,
-			value TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建表失败: %v", err)
+	cmd := exec.Command(syncExe)
+	core.SetHideWindow(cmd)
+	if err := cmd.Start(); err != nil {
+		log.Printf("启动同步服务失败: %v", err)
+		return
 	}
-
-	// 创建索引
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_settings_key ON settings(key)`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建索引失败: %v", err)
+	// 等待端口就绪（最多约 2 秒）
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		conn, err := net.DialTimeout("tcp", syncAddr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			log.Printf("同步服务已自动启动")
+			return
+		}
 	}
+	log.Printf("同步服务启动超时")
+}
 
-	// 创建同步日志表
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS sync_logs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			repo_name TEXT NOT NULL,
-			repo_path TEXT NOT NULL,
-			time TEXT,
-			success INTEGER NOT NULL DEFAULT 0,
-			message TEXT,
-			commit_log TEXT,
-			pull_log TEXT,
-			push_log TEXT
-		)
-	`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建同步日志表失败: %v", err)
-	}
+// StartChangeWatcher 周期性比对新后台服务的数据库指纹，数据变化时通过 EventsEmit 推送给前端。
+// 数据库由服务独占，GUI 不直接访问数据库，只轮询一条轻量指纹接口；
+// 指纹变化时才拉取全量数据并向 WebView 发事件。
+func (a *App) StartChangeWatcher(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
 
-	// 创建索引
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_sync_logs_repo_path ON sync_logs(repo_path)`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建同步日志索引失败: %v", err)
-	}
+		var lastFingerprint string
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				body, err := svcPost("/fingerprint", "")
+				if err != nil {
+					continue
+				}
+				var fp types.FingerprintRes
+				if json.Unmarshal([]byte(body), &fp) != nil || fp.Fingerprint == "" {
+					continue
+				}
+				if fp.Fingerprint == lastFingerprint {
+					continue
+				}
+				// 首次运行只记录基线不推送：前端启动时会主动加载一次
+				if lastFingerprint == "" {
+					lastFingerprint = fp.Fingerprint
+					continue
+				}
+				lastFingerprint = fp.Fingerprint
 
-	// 创建Git仓库表
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS git_repos (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			path TEXT NOT NULL UNIQUE,
-			name TEXT NOT NULL,
-			branch TEXT,
-			remote TEXT,
-			remote_url TEXT,
-			last_sync_time TEXT,
-			status TEXT,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			auto_sync INTEGER NOT NULL DEFAULT 0,
-			commit_only INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建Git仓库表失败: %v", err)
-	}
+				if logsRes := a.GetSyncLogs(types.SyncLogsReq{Limit: 50}); logsRes.Success {
+					runtime.EventsEmit(ctx, "sync:logs", logsRes.Logs)
+				}
+				if reposRes := a.LoadGitRepoList(); reposRes.Success {
+					runtime.EventsEmit(ctx, "git:repos", reposRes.Repos)
+				}
+			}
+		}
+	}()
+}
 
-	// 创建索引
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_git_repos_path ON git_repos(path)`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建Git仓库索引失败: %v", err)
-	}
+// ==================== 窗口状态（本地 JSON 文件，不经数据库） ====================
 
-	// 添加enabled列（如果不存在）
-	_, err = db.Exec(`ALTER TABLE git_repos ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
-	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-		db.Close()
-		return fmt.Errorf("添加enabled列失败: %v", err)
-	}
-
-	// 添加commit_only列（如果不存在）
-	_, err = db.Exec(`ALTER TABLE git_repos ADD COLUMN commit_only INTEGER NOT NULL DEFAULT 0`)
-	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-		db.Close()
-		return fmt.Errorf("添加commit_only列失败: %v", err)
-	}
-
-	// 创建窗口状态表
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS window_state (
-			id INTEGER PRIMARY KEY,
-			width INTEGER,
-			height INTEGER,
-			x INTEGER,
-			y INTEGER,
-			maximized INTEGER DEFAULT 0,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		db.Close()
-		return fmt.Errorf("创建窗口状态表失败: %v", err)
-	}
-
-	a.SettingsDb = db
-	return nil
+// uiStateFilePath UI 状态文件路径
+func uiStateFilePath() string {
+	return filepath.Join(core.GetTempDir(), "ui_state.json")
 }
 
 // WindowState 窗口状态
@@ -186,32 +160,23 @@ type WindowState struct {
 	Maximized int `json:"maximized"`
 }
 
-// GetWindowState 获取窗口状态
+// GetWindowState 获取窗口状态（文件不存在或损坏时返回零值，由调用方使用默认尺寸）
 func (a *App) GetWindowState() WindowState {
-	if a.SettingsDb == nil {
-		return WindowState{}
-	}
-
-	row := a.SettingsDb.QueryRow("SELECT width, height, x, y, maximized FROM window_state WHERE id = 1")
 	var ws WindowState
-	err := row.Scan(&ws.Width, &ws.Height, &ws.X, &ws.Y, &ws.Maximized)
-	if err != nil {
-		return WindowState{}
+	data := core.ReadFileToByte(uiStateFilePath())
+	if len(data) > 0 {
+		core.JsonToObject(&data, &ws)
 	}
 	return ws
 }
 
 // SaveWindowState 保存窗口状态
 func (a *App) SaveWindowState(ws WindowState) error {
-	if a.SettingsDb == nil {
-		return fmt.Errorf("数据库未初始化")
+	core.WriteStrToFile(uiStateFilePath(), core.ToJsonString(ws))
+	if exists, _ := core.PathExists(uiStateFilePath()); !exists {
+		return fmt.Errorf("写入 UI 状态文件失败: %s", uiStateFilePath())
 	}
-
-	_, err := a.SettingsDb.Exec(`
-		INSERT OR REPLACE INTO window_state (id, width, height, x, y, maximized, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, ws.Width, ws.Height, ws.X, ws.Y, ws.Maximized)
-	return err
+	return nil
 }
 
 // SaveCurrentWindowState 捕获并保存当前窗口状态
@@ -219,12 +184,26 @@ func (a *App) SaveCurrentWindowState() error {
 	if a.ctx == nil {
 		return fmt.Errorf("context未初始化")
 	}
-	width, height := runtime.WindowGetSize(a.ctx)
-	x, y := runtime.WindowGetPosition(a.ctx)
 	maximized := 0
 	if runtime.WindowIsMaximised(a.ctx) {
 		maximized = 1
 	}
+	if maximized == 1 {
+		// 最大化状态下取到的宽高是铺满屏幕的尺寸，直接保存会导致还原后窗口占满整个屏幕；
+		// 保留上一次正常状态下的几何信息，仅更新最大化标记
+		prev := a.GetWindowState()
+		if prev.Width > 0 && prev.Height > 0 {
+			return a.SaveWindowState(WindowState{
+				Width:     prev.Width,
+				Height:    prev.Height,
+				X:         prev.X,
+				Y:         prev.Y,
+				Maximized: 1,
+			})
+		}
+	}
+	width, height := runtime.WindowGetSize(a.ctx)
+	x, y := runtime.WindowGetPosition(a.ctx)
 	return a.SaveWindowState(WindowState{
 		Width:     width,
 		Height:    height,
@@ -245,63 +224,38 @@ func (a *App) SelectDirectory() (string, error) {
 	return selection, nil
 }
 
-// ==================== Git同步功能 ====================
+// ==================== Git同步功能（数据经后台服务） ====================
 
-// GitRepo Git仓库信息
-type GitRepo struct {
-	Path            string `json:"path"`            // 仓库路径
-	Name            string `json:"name"`            // 仓库名称
-	Branch          string `json:"branch"`          // 当前分支
-	Remote          string `json:"remote"`          // 远程仓库名
-	RemoteUrl       string `json:"remoteUrl"`       // 远程仓库URL
-	LastSyncTime    string `json:"lastSyncTime"`    // 上次同步时间
-	Status          string `json:"status"`          // 状态
-	Enabled         bool   `json:"enabled"`         // 是否启用
-	AutoSync        bool   `json:"autoSync"`        // 是否自动同步
-	CommitOnly      bool   `json:"commitOnly"`      // 仅提交，不推送
-	LastSyncSuccess int    `json:"lastSyncSuccess"` // 最近同步状态: -1=从未同步, 0=失败, 1=成功
-}
-
-// GitSyncReq Git同步请求
-type GitSyncReq struct {
-	Repos []GitRepo `json:"repos"` // 要同步的仓库列表
-}
-
-// GitSyncResult 单个仓库同步结果
-type GitSyncResult struct {
-	Path      string `json:"path"`      // 仓库路径
-	Name      string `json:"name"`      // 仓库名称
-	Success   bool   `json:"success"`   // 是否成功
-	Message   string `json:"message"`   // 结果信息
-	PullLog   string `json:"pullLog"`   // pull输出
-	PushLog   string `json:"pushLog"`   // push输出
-	CommitLog string `json:"commitLog"` // commit输出
-	Committed bool   `json:"committed"` // 是否提交了更改
-	Pushed    bool   `json:"pushed"`    // 是否推送了更改
-}
-
-// GitSyncRes Git同步结果
-type GitSyncRes struct {
-	Success bool            `json:"success"`
-	Message string          `json:"message"`
-	Results []GitSyncResult `json:"results"`
-}
-
-// GitSync 同步Git仓库（调用后台服务）
-func (a *App) GitSync(req GitSyncReq) GitSyncRes {
-	resp, err := http.Post("http://localhost:19090/sync", "application/json", nil)
+// GitSync 同步Git仓库（调用后台 sync 服务，由其逐仓库执行并返回每个仓库的结果）
+func (a *App) GitSync(req types.SyncReq) types.SyncRes {
+	body, err := svcPost("/sync", "")
 	if err != nil {
-		return GitSyncRes{
+		return types.SyncRes{
 			Success: false,
-			Message: "调用同步服务失败: " + err.Error(),
+			Message: err.Error(),
+			Results: []types.SyncResult{},
 		}
 	}
-	defer resp.Body.Close()
 
-	return GitSyncRes{
+	var res types.SyncRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return types.SyncRes{
+			Success: false,
+			Message: "解析同步结果失败: " + err.Error(),
+			Results: []types.SyncResult{},
+		}
+	}
+
+	successCount := 0
+	for _, r := range res.Results {
+		if r.Success {
+			successCount++
+		}
+	}
+	return types.SyncRes{
 		Success: true,
-		Message: fmt.Sprintf("已调用同步服务"),
-		Results: []GitSyncResult{},
+		Message: fmt.Sprintf("同步完成：%d 成功 / %d 失败", successCount, len(res.Results)-successCount),
+		Results: res.Results,
 	}
 }
 
@@ -312,13 +266,13 @@ type GetGitRepoInfoReq struct {
 
 // GetGitRepoInfoRes 获取仓库信息结果
 type GetGitRepoInfoRes struct {
-	Success   bool     `json:"success"`
-	Message   string   `json:"message"`
-	Repo      *GitRepo `json:"repo"`
-	IsGitRepo bool     `json:"isGitRepo"` // 是否是git仓库
+	Success   bool           `json:"success"`
+	Message   string         `json:"message"`
+	Repo      *types.GitRepo `json:"repo"`
+	IsGitRepo bool           `json:"isGitRepo"` // 是否是git仓库
 }
 
-// GetGitRepoInfo 获取Git仓库信息
+// GetGitRepoInfo 获取Git仓库信息（只读 git 命令检查，不访问数据库）
 func (a *App) GetGitRepoInfo(req GetGitRepoInfoReq) GetGitRepoInfoRes {
 	if req.Path == "" {
 		return GetGitRepoInfoRes{
@@ -349,18 +303,22 @@ func (a *App) GetGitRepoInfo(req GetGitRepoInfoReq) GetGitRepoInfoRes {
 		}
 	}
 
-	// 获取当前分支
-	branchOutput := core.ExecuteCommandByTargetDir(req.Path, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branch := strings.TrimSpace(string(*branchOutput))
+	// 获取当前分支（ unborn 仓库或命令失败时返回空，由界面显示空分支）
+	branch, branchErr := gitcmd.Git(req.Path, "rev-parse", "--abbrev-ref", "HEAD")
+	if branchErr != nil || branch == "" || branch == "HEAD" {
+		branch = ""
+	}
 
 	// 获取远程仓库信息
-	remoteOutput := core.ExecuteCommandByTargetDir(req.Path, "git", "remote", "get-url", "origin")
-	remoteUrl := strings.TrimSpace(string(*remoteOutput))
+	remoteUrl, remoteErr := gitcmd.Git(req.Path, "remote", "get-url", "origin")
+	if remoteErr != nil {
+		remoteUrl = ""
+	}
 
 	// 获取仓库名称
 	repoName := filepath.Base(req.Path)
 
-	repo := &GitRepo{
+	repo := &types.GitRepo{
 		Path:      req.Path,
 		Name:      repoName,
 		Branch:    branch,
@@ -368,6 +326,9 @@ func (a *App) GetGitRepoInfo(req GetGitRepoInfoReq) GetGitRepoInfoRes {
 		RemoteUrl: remoteUrl,
 		Status:    "就绪",
 		Enabled:   true,
+		Interval:  0,
+		// 新添加的仓库从未同步过，置为 -1（否则 0 会被界面当作"同步失败"）
+		LastSyncSuccess: -1,
 	}
 
 	return GetGitRepoInfoRes{
@@ -378,225 +339,43 @@ func (a *App) GetGitRepoInfo(req GetGitRepoInfoReq) GetGitRepoInfoRes {
 	}
 }
 
-// GitRepoListReq 仓库列表请求
-type GitRepoListReq struct {
-	Repos []GitRepo `json:"repos"`
-}
-
-// GitRepoListRes 仓库列表结果
-type GitRepoListRes struct {
-	Success bool      `json:"success"`
-	Message string    `json:"message"`
-	Repos   []GitRepo `json:"repos"`
-}
-
-// SaveGitRepoList 保存仓库列表到SQLite
-func (a *App) SaveGitRepoList(req GitRepoListReq) GitRepoListRes {
-	if a.SettingsDb == nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "数据库未初始化",
-		}
-	}
-
-	// 先删除所有现有仓库
-	_, err := a.SettingsDb.Exec("DELETE FROM git_repos")
+// SaveGitRepoList 保存仓库列表（代理到后台服务，由其写库并刷新自动同步缓存）
+func (a *App) SaveGitRepoList(req types.RepoListReq) types.RepoListRes {
+	body, err := svcPost("/repos/save", core.ToJsonString(req))
 	if err != nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "清空仓库列表失败: " + err.Error(),
-		}
+		return types.RepoListRes{Success: false, Message: err.Error()}
 	}
+	var res types.RepoListRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return types.RepoListRes{Success: false, Message: "解析保存结果失败: " + err.Error()}
+	}
+	return res
+}
 
-	// 批量插入新仓库
-	tx, err := a.SettingsDb.Begin()
+// LoadGitRepoList 加载仓库列表（代理到后台服务）
+func (a *App) LoadGitRepoList() types.RepoListRes {
+	body, err := svcPost("/repos/list", "")
 	if err != nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "开始事务失败: " + err.Error(),
-		}
+		return types.RepoListRes{Success: false, Message: err.Error(), Repos: []types.GitRepo{}}
 	}
-	defer tx.Rollback()
+	var res types.RepoListRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return types.RepoListRes{Success: false, Message: "解析仓库列表失败: " + err.Error(), Repos: []types.GitRepo{}}
+	}
+	return res
+}
 
-	stmt, err := tx.Prepare(`
-		INSERT INTO git_repos (path, name, branch, remote, remote_url, last_sync_time, status, enabled, auto_sync, commit_only)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+// GetSyncLogs 获取同步日志（代理到后台服务）
+func (a *App) GetSyncLogs(req types.SyncLogsReq) types.SyncLogsRes {
+	body, err := svcPost("/logs", core.ToJsonString(req))
 	if err != nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "预处理失败: " + err.Error(),
-		}
+		return types.SyncLogsRes{Success: false, Message: err.Error(), Logs: []types.SyncLog{}}
 	}
-	defer stmt.Close()
-
-	for _, repo := range req.Repos {
-		autoSync := 0
-		if repo.AutoSync {
-			autoSync = 1
-		}
-		enabled := 0
-		if repo.Enabled {
-			enabled = 1
-		}
-		commitOnly := 0
-		if repo.CommitOnly {
-			commitOnly = 1
-		}
-		_, err = stmt.Exec(repo.Path, repo.Name, repo.Branch, repo.Remote, repo.RemoteUrl, repo.LastSyncTime, repo.Status, enabled, autoSync, commitOnly)
-		if err != nil {
-			return GitRepoListRes{
-				Success: false,
-				Message: "保存仓库失败: " + err.Error(),
-			}
-		}
+	var res types.SyncLogsRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return types.SyncLogsRes{Success: false, Message: "解析日志失败: " + err.Error(), Logs: []types.SyncLog{}}
 	}
-
-	if err = tx.Commit(); err != nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "提交事务失败: " + err.Error(),
-		}
-	}
-
-	// 通知 sync 服务刷新缓存
-	go notifySyncRefresh()
-
-	return GitRepoListRes{
-		Success: true,
-		Message: fmt.Sprintf("保存了 %d 个仓库", len(req.Repos)),
-		Repos:   req.Repos,
-	}
-}
-
-// LoadGitRepoList 从SQLite加载仓库列表
-func (a *App) LoadGitRepoList() GitRepoListRes {
-	if a.SettingsDb == nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "数据库未初始化",
-			Repos:   []GitRepo{},
-		}
-	}
-
-	rows, err := a.SettingsDb.Query(`
-		SELECT path, name, branch, remote, remote_url, last_sync_time, status, enabled, auto_sync, commit_only,
-			COALESCE((SELECT success FROM sync_logs WHERE repo_path = git_repos.path ORDER BY id DESC LIMIT 1), -1) AS last_sync_success
-		FROM git_repos ORDER BY id
-	`)
-	if err != nil {
-		return GitRepoListRes{
-			Success: false,
-			Message: "查询失败: " + err.Error(),
-			Repos:   []GitRepo{},
-		}
-	}
-	defer rows.Close()
-
-	repos := []GitRepo{}
-	for rows.Next() {
-		var repo GitRepo
-		var enabled, autoSync, commitOnly int
-		var lastSyncSuccess int
-		err := rows.Scan(&repo.Path, &repo.Name, &repo.Branch, &repo.Remote, &repo.RemoteUrl, &repo.LastSyncTime, &repo.Status, &enabled, &autoSync, &commitOnly, &lastSyncSuccess)
-		if err != nil {
-			continue
-		}
-		repo.Enabled = enabled == 1
-		repo.AutoSync = autoSync == 1
-		repo.CommitOnly = commitOnly == 1
-		repo.LastSyncSuccess = lastSyncSuccess
-		repos = append(repos, repo)
-	}
-
-	return GitRepoListRes{
-		Success: true,
-		Message: fmt.Sprintf("加载了 %d 个仓库", len(repos)),
-		Repos:   repos,
-	}
-}
-
-// GitSyncLog 同步日志
-type GitSyncLog struct {
-	ID        int    `json:"id"`        // 日志ID
-	RepoName  string `json:"repoName"`  // 仓库名称
-	RepoPath  string `json:"repoPath"`  // 仓库路径
-	Time      string `json:"time"`      // 同步时间
-	Success   bool   `json:"success"`   // 是否成功
-	Message   string `json:"message"`   // 结果信息
-	CommitLog string `json:"commitLog"` // commit输出
-	PullLog   string `json:"pullLog"`   // pull输出
-	PushLog   string `json:"pushLog"`   // push输出
-}
-
-// GetSyncLogsReq 获取同步日志请求
-type GetSyncLogsReq struct {
-	RepoPath string `json:"repoPath"` // 仓库路径(可选)
-	Limit    int    `json:"limit"`    // 获取条数
-}
-
-// GetSyncLogsRes 获取同步日志结果
-type GetSyncLogsRes struct {
-	Success bool         `json:"success"`
-	Message string       `json:"message"`
-	Logs    []GitSyncLog `json:"logs"`
-}
-
-// GetSyncLogs 获取同步日志
-func (a *App) GetSyncLogs(req GetSyncLogsReq) GetSyncLogsRes {
-	limit := req.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-
-	if a.SettingsDb == nil {
-		return GetSyncLogsRes{
-			Success: false,
-			Message: "数据库未初始化",
-			Logs:    []GitSyncLog{},
-		}
-	}
-
-	// 构建查询
-	query := "SELECT id, repo_name, repo_path, time, success, message, commit_log, pull_log, push_log FROM sync_logs"
-	args := []interface{}{}
-
-	if req.RepoPath != "" {
-		query += " WHERE repo_path = ?"
-		args = append(args, req.RepoPath)
-	}
-
-	query += " ORDER BY time DESC LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := a.SettingsDb.Query(query, args...)
-	if err != nil {
-		return GetSyncLogsRes{
-			Success: false,
-			Message: "查询失败: " + err.Error(),
-			Logs:    []GitSyncLog{},
-		}
-	}
-	defer rows.Close()
-
-	logs := []GitSyncLog{}
-	for rows.Next() {
-		var syncLog GitSyncLog
-		var success int
-		err := rows.Scan(&syncLog.ID, &syncLog.RepoName, &syncLog.RepoPath, &syncLog.Time, &success, &syncLog.Message, &syncLog.CommitLog, &syncLog.PullLog, &syncLog.PushLog)
-		if err != nil {
-			log.Printf("扫描同步日志失败: %v", err)
-			continue
-		}
-		syncLog.Success = success == 1
-		logs = append(logs, syncLog)
-	}
-
-	return GetSyncLogsRes{
-		Success: true,
-		Message: fmt.Sprintf("共 %d 条日志", len(logs)),
-		Logs:    logs,
-	}
+	return res
 }
 
 // SendToFrontend 发送消息到前端
@@ -609,44 +388,54 @@ func (a *App) CopyToClipboard(text string) error {
 	return runtime.ClipboardSetText(a.ctx, text)
 }
 
-// ==================== 辅助函数 ====================
+// ==================== 配置（settings 表由后台服务独占） ====================
 
 // GetConfig 获取配置
 func (a *App) GetConfig(key string) (string, error) {
-	if a.SettingsDb == nil {
-		return "", fmt.Errorf("数据库未初始化")
-	}
-	var value string
-	err := a.SettingsDb.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&value)
+	body, err := svcPost("/config/get", core.ToJsonString(types.KeyValueReq{Key: key}))
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", nil
-		}
 		return "", err
 	}
-	return value, nil
+	var res types.KeyValueRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return "", err
+	}
+	if !res.Success {
+		return "", fmt.Errorf("%s", res.Message)
+	}
+	return res.Value, nil
 }
 
 // SetConfig 设置配置
 func (a *App) SetConfig(key, value string) error {
-	if a.SettingsDb == nil {
-		return fmt.Errorf("数据库未初始化")
+	body, err := svcPost("/config/set", core.ToJsonString(types.KeyValueReq{Key: key, Value: value}))
+	if err != nil {
+		return err
 	}
-	_, err := a.SettingsDb.Exec(`
-		INSERT INTO settings (key, value, updated_at)
-		VALUES (?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
-	`, key, value, value)
-	return err
+	var res types.KeyValueRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return err
+	}
+	if !res.Success {
+		return fmt.Errorf("%s", res.Message)
+	}
+	return nil
 }
 
 // DeleteConfig 删除配置
 func (a *App) DeleteConfig(key string) error {
-	if a.SettingsDb == nil {
-		return fmt.Errorf("数据库未初始化")
+	body, err := svcPost("/config/delete", core.ToJsonString(types.KeyValueReq{Key: key}))
+	if err != nil {
+		return err
 	}
-	_, err := a.SettingsDb.Exec("DELETE FROM settings WHERE key = ?", key)
-	return err
+	var res types.KeyValueRes
+	if err := json.Unmarshal([]byte(body), &res); err != nil {
+		return err
+	}
+	if !res.Success {
+		return fmt.Errorf("%s", res.Message)
+	}
+	return nil
 }
 
 // GetJsonConfig 获取JSON配置
@@ -678,13 +467,9 @@ func (a *App) OpenUrl(url string) error {
 // ReadEnvFiles 读取环境变量文件
 func (a *App) ReadEnvFiles(dir string) ([]string, error) {
 	var envFiles []string
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	for _, file := range files {
-		if !file.IsDir() && (strings.HasSuffix(file.Name(), ".env") || strings.HasSuffix(file.Name(), ".properties")) {
-			envFiles = append(envFiles, filepath.Join(dir, file.Name()))
+	for _, name := range core.ListFileName(dir, "", false, true) {
+		if strings.HasSuffix(name, ".env") || strings.HasSuffix(name, ".properties") {
+			envFiles = append(envFiles, filepath.Join(dir, name))
 		}
 	}
 	return envFiles, nil
@@ -692,16 +477,20 @@ func (a *App) ReadEnvFiles(dir string) ([]string, error) {
 
 // ReadFile 读取文件
 func (a *App) ReadFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
+	if exists, _ := core.PathExists(path); !exists {
+		return "", fmt.Errorf("文件不存在: %s", path)
 	}
-	return string(data), nil
+	content := core.ReadFileToStr(path)
+	return content, nil
 }
 
 // WriteFile 写入文件
 func (a *App) WriteFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0644)
+	core.WriteStrToFile(path, content)
+	if exists, _ := core.PathExists(path); !exists {
+		return fmt.Errorf("写入文件失败: %s", path)
+	}
+	return nil
 }
 
 // FileExists 检查文件是否存在
@@ -723,20 +512,22 @@ func (a *App) PathExists(path string) bool {
 
 // CreateDir 创建目录
 func (a *App) CreateDir(path string) error {
-	return os.MkdirAll(path, 0755)
+	core.MkDirALl0755(path)
+	if exists, _ := core.PathExists(path); !exists {
+		return fmt.Errorf("创建目录失败: %s", path)
+	}
+	return nil
 }
 
 // ListDir 列出目录
 func (a *App) ListDir(dir string) ([]string, error) {
-	var files []string
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
+	names := core.ListFileName(dir, "", true, true)
+	if len(names) == 0 {
+		if exists, _ := core.PathExists(dir); !exists {
+			return nil, fmt.Errorf("目录不存在: %s", dir)
+		}
 	}
-	for _, entry := range entries {
-		files = append(files, entry.Name())
-	}
-	return files, nil
+	return names, nil
 }
 
 // GetSystemEnv 获取系统环境变量
@@ -811,17 +602,6 @@ func (a *App) IsWindowMaximized() bool {
 	return runtime.WindowIsMaximised(a.ctx)
 }
 
-// notifySyncRefresh 通知 sync 服务刷新缓存
-func notifySyncRefresh() {
-	resp, err := http.Post("http://localhost:19090/refresh", "application/json", nil)
-	if err != nil {
-		log.Printf("通知 sync 刷新失败: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	log.Printf("已通知 sync 刷新缓存")
-}
-
 // ResetResult 重置结果
 type ResetResult struct {
 	Success bool   `json:"success"`
@@ -839,101 +619,100 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 	projectDir := req.Path
 	log.Printf("开始重置项目, 目录: %s", projectDir)
 
-	var output string
-
-	// 使用 git 命令获取分支名
-	branchOut := core.ExecuteCommandByTargetDir(projectDir, "git", "rev-parse", "--abbrev-ref", "HEAD")
-	branch := strings.TrimSpace(string(*branchOut))
-	if branch == "" || strings.HasPrefix(branch, "fatal:") || strings.HasPrefix(branch, "error:") {
+	// 删除 .git 前必须先拿到原分支名与远程地址
+	branchOut, branchErr := gitcmd.Git(projectDir, "rev-parse", "--abbrev-ref", "HEAD")
+	branch := strings.TrimSpace(branchOut)
+	if branchErr != nil || branch == "" || branch == "HEAD" {
 		branch = "master"
-		log.Printf("获取分支名失败，使用默认值 master: %s", branch)
+		log.Printf("获取分支名失败，使用默认值 master")
 	}
 	log.Printf("检测到分支: %s", branch)
 
-	// 使用 git 命令获取远程地址
-	remoteOut := core.ExecuteCommandByTargetDir(projectDir, "git", "remote", "get-url", "origin")
-	remoteURL := strings.TrimSpace(string(*remoteOut))
-	if remoteURL == "" || strings.HasPrefix(remoteURL, "fatal:") || strings.HasPrefix(remoteURL, "error:") {
+	remoteURL, remoteErr := gitcmd.Git(projectDir, "remote", "get-url", "origin")
+	remoteURL = strings.TrimSpace(remoteURL)
+	if remoteErr != nil || remoteURL == "" {
 		log.Printf("获取远程地址失败: %s", remoteURL)
-	}
-	log.Printf("检测到远程地址: %s", remoteURL)
-
-	// 验证必需信息
-	if branch == "" {
-		return ResetResult{
-			Success: false,
-			Message: "未检测到分支名，请确保是有效的 Git 仓库",
-			Output:  "",
-		}
-	}
-	if remoteURL == "" {
 		return ResetResult{
 			Success: false,
 			Message: "未检测到远程地址，请确保仓库已配置 remote origin",
-			Output:  "",
+			Output:  remoteURL,
 		}
 	}
+	log.Printf("检测到远程地址: %s", remoteURL)
 
 	gitDir := filepath.Join(projectDir, ".git")
 
-	// 1. rm -rf .git (使用 Go 实现)
+	var output string
+
+	// 1. rm -rf .git (使用 Go 实现)，失败则中止
 	output += "rm -rf .git\n"
 	if err := os.RemoveAll(gitDir); err != nil {
 		output += err.Error() + "\n"
 		log.Printf("删除 .git 失败: %v", err)
-	} else {
-		output += "成功\n"
+		return ResetResult{
+			Success: false,
+			Message: "删除 .git 失败",
+			Output:  output,
+		}
 	}
 
 	// 2. git init -b <branch>
-	output += fmt.Sprintf("git init -b %s\n", branch)
-	initOut := core.ExecuteCommandByTargetDir(projectDir, "git", "init", "-b", branch)
-	if isGitFailure(string(*initOut)) {
-		output += string(*initOut) + "\n"
-	} else {
-		output += "成功\n"
+	initOut, initErr := gitcmd.Git(projectDir, "init", "-b", branch)
+	output += fmt.Sprintf("git init -b %s\n%s\n", branch, initOut)
+	if initErr != nil {
+		return ResetResult{
+			Success: false,
+			Message: "git init 失败",
+			Output:  output,
+		}
 	}
 
 	// 3. git add .
-	output += "git add .\n"
-	addOut := core.ExecuteCommandByTargetDir(projectDir, "git", "add", ".")
-	if isGitFailure(string(*addOut)) {
-		output += string(*addOut) + "\n"
-	} else {
-		output += "成功\n"
+	addOut, addErr := gitcmd.Git(projectDir, "add", ".")
+	output += fmt.Sprintf("git add .\n%s\n", addOut)
+	if addErr != nil {
+		return ResetResult{
+			Success: false,
+			Message: "git add 失败",
+			Output:  output,
+		}
 	}
 
 	// 4. git commit -m "基本功能实现V1.0"
-	output += "git commit -m \"基本功能实现V1.0\"\n"
-	commitOut := core.ExecuteCommandByTargetDir(projectDir, "git", "commit", "-m", "基本功能实现V1.0")
-	if isGitFailure(string(*commitOut)) {
-		output += string(*commitOut) + "\n"
-	} else {
-		output += "成功\n"
+	commitOut, commitErr := gitcmd.Git(projectDir, "commit", "-m", "基本功能实现V1.0")
+	output += fmt.Sprintf("git commit -m \"基本功能实现V1.0\"\n%s\n", commitOut)
+	if commitErr != nil {
+		return ResetResult{
+			Success: false,
+			Message: "git commit 失败",
+			Output:  output,
+		}
 	}
 
-	// 5. git remote add origin <url>
-	output += fmt.Sprintf("git remote add origin %s\n", remoteURL)
-	remoteAddOut := core.ExecuteCommandByTargetDir(projectDir, "git", "remote", "add", "origin", remoteURL)
-	if isGitFailure(string(*remoteAddOut)) {
-		// 可能是 remote 已存在，尝试 set-url
-		setUrlOut := core.ExecuteCommandByTargetDir(projectDir, "git", "remote", "set-url", "origin", remoteURL)
-		if isGitFailure(string(*setUrlOut)) {
-			output += string(*setUrlOut) + "\n"
-		} else {
-			output += "成功\n"
+	// 5. git remote add origin <url>（正常情况下新 init 的仓库不会有旧 remote，set-url 仅作兜底）
+	remoteAddOut, remoteAddErr := gitcmd.Git(projectDir, "remote", "add", "origin", remoteURL)
+	output += fmt.Sprintf("git remote add origin %s\n%s\n", remoteURL, remoteAddOut)
+	if remoteAddErr != nil {
+		setUrlOut, setUrlErr := gitcmd.Git(projectDir, "remote", "set-url", "origin", remoteURL)
+		output += fmt.Sprintf("git remote set-url origin %s\n%s\n", remoteURL, setUrlOut)
+		if setUrlErr != nil {
+			return ResetResult{
+				Success: false,
+				Message: "设置远程地址失败",
+				Output:  output,
+			}
 		}
-	} else {
-		output += "成功\n"
 	}
 
 	// 6. git push -f -u origin <branch>
-	output += fmt.Sprintf("git push -f -u origin %s\n", branch)
-	pushOut := core.ExecuteCommandByTargetDir(projectDir, "git", "push", "-f", "-u", "origin", branch)
-	if isGitFailure(string(*pushOut)) {
-		output += string(*pushOut) + "\n"
-	} else {
-		output += "成功\n"
+	pushOut, pushErr := gitcmd.Git(projectDir, "push", "-f", "-u", "origin", branch)
+	output += fmt.Sprintf("git push -f -u origin %s\n%s\n", branch, pushOut)
+	if pushErr != nil {
+		return ResetResult{
+			Success: false,
+			Message: "git push 失败",
+			Output:  output,
+		}
 	}
 
 	log.Printf("重置完成, 输出:\n%s", output)
@@ -942,12 +721,6 @@ func (a *App) ResetProject(req ResetReq) ResetResult {
 		Message: "重置完成",
 		Output:  output,
 	}
-}
-
-// isGitFailure 通过输出内容判断 git 命令是否失败（common 的 ExecuteCommandByTargetDir 不返回 error）
-func isGitFailure(out string) bool {
-	s := strings.TrimSpace(out)
-	return strings.HasPrefix(s, "fatal:") || strings.HasPrefix(s, "error:") || strings.HasPrefix(s, "git: ")
 }
 
 // SoftResetResult 软重置结果
@@ -973,13 +746,9 @@ func (a *App) SoftReset(req SoftResetReq) SoftResetResult {
 	log.Printf("开始软重置, 目录: %s, 提交信息: %s", projectDir, commitMsg)
 
 	var output string
-	runGit := func(args ...string) (string, bool) {
-		out := core.ExecuteCommandByTargetDir(projectDir, "git", args...)
-		s := strings.TrimSpace(string(*out))
-		return s, isGitFailure(s)
-	}
-branchOut, branchFailed := runGit("rev-parse", "--abbrev-ref", "HEAD")
-	if branchFailed || branchOut == "" || branchOut == "HEAD" {
+
+	branchOut, branchErr := gitcmd.Git(projectDir, "rev-parse", "--abbrev-ref", "HEAD")
+	if branchErr != nil || branchOut == "" || branchOut == "HEAD" {
 		return SoftResetResult{
 			Success: false,
 			Message: "未检测到当前分支，请确保是有效的 Git 仓库",
@@ -990,14 +759,15 @@ branchOut, branchFailed := runGit("rev-parse", "--abbrev-ref", "HEAD")
 
 	output += fmt.Sprintf("当前分支: %s\n", branch)
 
-	fetchOut, fetchFailed := runGit("fetch", "origin", branch)
+	fetchOut, fetchErr := gitcmd.Git(projectDir, "fetch", "origin", branch)
 	output += fmt.Sprintf("git fetch origin %s\n%s\n", branch, fetchOut)
-	if fetchFailed {
+	if fetchErr != nil {
 		log.Printf("git fetch 失败: %s", fetchOut)
 	}
 
 	remoteRef := fmt.Sprintf("origin/%s", branch)
-	if existsOut, _ := runGit("rev-parse", "--verify", "--quiet", remoteRef); existsOut == "" {
+	existsOut, existsErr := gitcmd.Git(projectDir, "rev-parse", "--verify", "--quiet", remoteRef)
+	if existsErr != nil || existsOut == "" {
 		return SoftResetResult{
 			Success: false,
 			Message: fmt.Sprintf("未找到远程分支 %s，无法软重置", remoteRef),
@@ -1005,9 +775,9 @@ branchOut, branchFailed := runGit("rev-parse", "--abbrev-ref", "HEAD")
 		}
 	}
 
-	resetOut, resetFailed := runGit("reset", "--soft", remoteRef)
+	resetOut, resetErr := gitcmd.Git(projectDir, "reset", "--soft", remoteRef)
 	output += fmt.Sprintf("git reset --soft %s\n%s\n", remoteRef, resetOut)
-	if resetFailed {
+	if resetErr != nil {
 		log.Printf("git reset --soft 失败: %s", resetOut)
 		return SoftResetResult{
 			Success: false,
@@ -1016,9 +786,9 @@ branchOut, branchFailed := runGit("rev-parse", "--abbrev-ref", "HEAD")
 		}
 	}
 
-	commitOut, commitFailed := runGit("commit", "-m", commitMsg)
+	commitOut, commitErr := gitcmd.Git(projectDir, "commit", "-m", commitMsg)
 	output += fmt.Sprintf("git commit -m \"%s\"\n%s\n", commitMsg, commitOut)
-	if commitFailed {
+	if commitErr != nil {
 		log.Printf("git commit 失败: %s", commitOut)
 		return SoftResetResult{
 			Success: false,
@@ -1037,10 +807,10 @@ branchOut, branchFailed := runGit("rev-parse", "--abbrev-ref", "HEAD")
 
 // PackageResult 打包结果
 type PackageResult struct {
-	Success     bool   `json:"success"`
-	Message     string `json:"message"`
-	Output      string `json:"output"`
-	OutputDir   string `json:"outputDir"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	Output    string `json:"output"`
+	OutputDir string `json:"outputDir"`
 }
 
 // PackageReq 打包请求
@@ -1083,14 +853,19 @@ func (a *App) PackageProject(req PackageReq) PackageResult {
 	// 打包产物在 projectDir/build/bin/ 目录下
 	outputDir := filepath.Join(projectDir, "build", "bin")
 
-	// 查找生成的 exe 文件
+	// 查找最新生成的 exe 文件（目录中可能残留历史构建产物）
 	var exeFile string
+	var newest time.Time
 	entries, err := os.ReadDir(outputDir)
 	if err == nil {
 		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".exe") {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".exe") {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr == nil && (exeFile == "" || info.ModTime().After(newest)) {
 				exeFile = entry.Name()
-				break
+				newest = info.ModTime()
 			}
 		}
 	}
@@ -1110,30 +885,12 @@ func (a *App) PackageProject(req PackageReq) PackageResult {
 	targetPath := filepath.Join(targetDir, exeFile)
 
 	// 确保目标目录存在
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		log.Printf("创建目标目录失败: %v", err)
-		return PackageResult{
-			Success:   false,
-			Message:   "打包成功但创建目标目录失败: " + err.Error(),
-			Output:    output,
-			OutputDir: outputDir,
-		}
-	}
+	core.MkDirALl0755(targetDir)
 
-	// 复制文件
+	// 复制文件（common 的 CopyFile 打开目标文件不带 O_TRUNC，先删除旧文件避免残留字节导致 exe 损坏）
 	sourcePath := filepath.Join(outputDir, exeFile)
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		log.Printf("读取 exe 文件失败: %v", err)
-		return PackageResult{
-			Success:   false,
-			Message:   "打包成功但读取 exe 失败: " + err.Error(),
-			Output:    output,
-			OutputDir: outputDir,
-		}
-	}
-
-	if err := os.WriteFile(targetPath, data, 0755); err != nil {
+	_ = os.Remove(targetPath)
+	if _, err := core.CopyFile(sourcePath, targetPath); err != nil {
 		log.Printf("复制 exe 到目标目录失败: %v", err)
 		return PackageResult{
 			Success:   false,

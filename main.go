@@ -25,19 +25,16 @@ var appCtx context.Context
 
 func main() {
 	processStart := time.Now()
+	// InitLog 会在 {用户缓存目录}/wtools 下创建日志文件，首次运行时目录可能不存在，必须先创建
+	core.MkDirALl0755(core.GetTempDir())
 	myUtil.InitLog(true)
 
 	startSt := time.Now().Format("2006-01-02 15:04:05.000")
-	core.MkDirALl0755(filepath.Join(core.GetTempDir(), "/codeGen"))
 	application := NewApp(assets)
 	log.Printf("%s", startSt+" log init finish! "+time.Now().Format("2006-01-02 15:04:05.000"))
 
-	// 初始化配置数据库（sqlite）
-	if err := application.InitSettingsDb(); err != nil {
-		log.Printf("初始化配置数据库失败: %v", err)
-	}
-
-	log.Printf("%s", "db init finish! "+time.Now().Format("2006-01-02 15:04:05.000"))
+	// 后台服务是数据库唯一属主，界面数据全部经其 HTTP 接口访问，启动前先确保服务可用
+	ensureSyncService()
 
 	// 默认窗口尺寸（宽度=800，高度=屏幕高-200）
 	screenWidth, screenHeight := core.GetScreenSize()
@@ -54,14 +51,14 @@ func main() {
 	}
 	log.Printf("屏幕尺寸: %dx%d, 默认窗口: %dx%d", screenWidth, screenHeight, defaultWidth, defaultHeight)
 
-	// 窗口标题（包含数据库路径）
-	dbPath := core.GetTempDir() + "/data/sync_list.db"
+	// 窗口标题（包含数据目录）
+	dataDir := filepath.Join(core.GetTempDir(), "data")
 
-	// 优先从 SQLite 加载窗口状态，否则使用默认尺寸
+	// 优先从 UI 状态文件加载窗口状态，否则使用默认尺寸
 	ws := application.GetWindowState()
 	width := ws.Width
 	height := ws.Height
-	log.Printf("[DEBUG] 从数据库加载的窗口尺寸: %dx%d", width, height)
+	log.Printf("[DEBUG] 从 UI 状态文件加载的窗口尺寸: %dx%d", width, height)
 	if width == 0 || height == 0 {
 		width = defaultWidth
 		height = defaultHeight
@@ -80,7 +77,7 @@ func main() {
 
 	// Create application with options
 	preRunElapsed := time.Since(processStart)
-	title := "Git同步工具 - " + dbPath + fmt.Sprintf(" (启动耗时: %dms)", preRunElapsed.Milliseconds())
+	title := "Git同步工具 - " + dataDir + fmt.Sprintf(" (启动耗时: %dms)", preRunElapsed.Milliseconds())
 	err := wails.Run(&options.App{
 		Title:             title,
 		Width:             width,
@@ -96,15 +93,15 @@ func main() {
 			EnableFileDrop:     true,
 			DisableWebViewDrop: true,
 		},
-		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
+		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 255},
 		OnStartup: func(ctx context.Context) {
 			appCtx = ctx
 			application.Startup(ctx)
 			// 启动完成后更新标题，显示完整启动耗时（含 WebView/前端）
 			fullElapsed := time.Since(processStart)
-			runtime.WindowSetTitle(ctx, fmt.Sprintf("Git同步工具 - %s (启动耗时: %dms)", dbPath, fullElapsed.Milliseconds()))
-			// 如果有保存的窗口位置，应用它
-			if ws.X > 0 || ws.Y > 0 {
+			runtime.WindowSetTitle(ctx, fmt.Sprintf("Git同步工具 - %s (启动耗时: %dms)", dataDir, fullElapsed.Milliseconds()))
+			// 如果有保存的窗口位置，应用它（坐标可能是负数，如副屏，因此不能只判断 >0）
+			if ws.X != 0 || ws.Y != 0 {
 				runtime.WindowSetPosition(ctx, ws.X, ws.Y)
 			}
 			// 如果窗口之前是最大化状态，恢复最大化
@@ -112,11 +109,16 @@ func main() {
 				runtime.WindowMaximise(ctx)
 			}
 		},
-		OnShutdown: application.Shutdown,
+		OnBeforeClose: func(ctx context.Context) bool {
+			// 关闭前保存窗口状态（WebView 的 beforeunload 在窗口关闭时并不可靠）
+			application.SaveCurrentWindowState()
+			return false
+		},
 		SingleInstanceLock: &options.SingleInstanceLock{
 			UniqueId: "wcj-go-git-singleton",
 			OnSecondInstanceLaunch: func(data options.SecondInstanceData) {
 				// 新实例启动时，激活已存在的老实例窗口
+				runtime.WindowUnminimise(appCtx)
 				runtime.Show(appCtx)
 			},
 		},

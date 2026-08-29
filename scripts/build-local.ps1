@@ -1,20 +1,25 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    本地打包 Windows UI 程序 (Wails) 和 sync/ 下的命令行程序，统一输出到 build/bin/。
+    本地打包 Windows UI 程序 (Wails) 和 sync/ 下的命令行程序，统一输出到 build/bin/，并部署到工具箱目录。
 
 .DESCRIPTION
     用法:
-        .\scripts\build-local.ps1                 # 默认 release 构建，输出到 build/bin/
+        .\scripts\build-local.ps1                 # 默认 release 构建，输出到 build/bin/ 并部署
         .\scripts\build-local.ps1 -Clean          # 构建前清理 build/bin/
         .\scripts\build-local.ps1 -SkipUI         # 只打包 sync/ 命令行程序
         .\scripts\build-local.ps1 -SkipCLI        # 只打包 Wails UI 程序
         .\scripts\build-local.ps1 -OutputDir dist  # 自定义输出目录
+        .\scripts\build-local.ps1 -NoDeploy       # 只构建不部署
+
+    行为:
+        - 打包前若 sync.exe 进程正在运行，先强制停止（避免文件占用导致构建/清理失败）
+        - 打包完成后把 Git同步工具.exe 和 sync.exe 一起部署到 -DeployDir（默认 E:\application\我的工具箱），
+          部署前若对应 exe 正在运行也会先停止
 
     产出:
         build/bin/Git同步工具.exe   <- Wails UI
         build/bin/sync.exe           <- sync/ 命令行程序
-        build/bin/README.txt         <- 版本/构建信息 (可选)
 #>
 
 [CmdletBinding()]
@@ -33,6 +38,16 @@ $ErrorActionPreference = 'Stop'
 function Write-Step($t) { Write-Host "`n==> $t" -ForegroundColor Cyan }
 function Write-Ok($t)   { Write-Host $t -ForegroundColor Green }
 function Write-Warn($t) { Write-Host $t -ForegroundColor Yellow }
+
+# 停止指定名称（不带 .exe 后缀）的进程，不存在时静默跳过
+function Stop-ExeProcess([string]$name) {
+    $procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+    if ($procs) {
+        Write-Host "  停止进程: $name (PID: $(($procs.Id) -join ', '))" -ForegroundColor Yellow
+        $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+    }
+}
 
 $root   = (Resolve-Path ".").Path
 $uiName = "Git同步工具"
@@ -69,6 +84,13 @@ if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 Write-Host "输出目录: $binDir"
+
+# --- stop running sync.exe ----------------------------------------------------
+# 正在运行的 sync.exe 会占用 build/bin 或部署目录中的 exe，打包前先停掉
+if (-not $SkipCLI -and -not $DryRun) {
+    Write-Step "检查并停止运行中的 sync.exe"
+    Stop-ExeProcess $cliName
+}
 
 # --- Wails UI ----------------------------------------------------------------
 if (-not $SkipUI) {
@@ -146,24 +168,35 @@ if (-not $SkipCLI) {
 }
 
 # --- deploy ------------------------------------------------------------------
-if (-not $SkipUI -and -not $NoDeploy) {
-    Write-Step "[3/3] 部署 UI 程序到: $DeployDir"
-    $srcUi = Join-Path $binDir "$uiName.exe"
-    if (-not (Test-Path -LiteralPath $srcUi)) {
-        Write-Warn "  未找到 $srcUi，跳过部署"
-    } else {
-        if ($DryRun) {
-            Write-Host "  (DRYRUN) copy: $srcUi -> $DeployDir"
-        } else {
-            if (-not (Test-Path -LiteralPath $DeployDir)) {
-                New-Item -ItemType Directory -Path $DeployDir -Force | Out-Null
-            }
-            Copy-Item -LiteralPath $srcUi -Destination (Join-Path $DeployDir "$uiName.exe") -Force
-            Write-Ok "  ✓ 已部署: $(Join-Path $DeployDir "$uiName.exe")"
-        }
-    }
-} elseif ($NoDeploy) {
+if ($NoDeploy) {
     Write-Warn "[3/3] 已跳过部署 (-NoDeploy)"
+} else {
+    Write-Step "[3/3] 部署程序到: $DeployDir"
+    if (-not (Test-Path -LiteralPath $DeployDir)) {
+        New-Item -ItemType Directory -Path $DeployDir -Force | Out-Null
+    }
+
+    # 把本次构建产出的 exe 都部署到目标目录
+    $artifacts = @()
+    if (-not $SkipUI)  { $artifacts += $uiName }
+    if (-not $SkipCLI) { $artifacts += $cliName }
+
+    foreach ($name in $artifacts) {
+        $src = Join-Path $binDir "$name.exe"
+        if (-not (Test-Path -LiteralPath $src)) {
+            Write-Warn "  未找到 $src，跳过部署"
+            continue
+        }
+        $dst = Join-Path $DeployDir "$name.exe"
+        if ($DryRun) {
+            Write-Host "  (DRYRUN) copy: $src -> $dst"
+            continue
+        }
+        # 部署目录中的 exe 若正在运行会占用文件，先停掉再覆盖
+        Stop-ExeProcess $name
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        Write-Ok "  ✓ 已部署: $dst"
+    }
 }
 
 # --- summary -----------------------------------------------------------------

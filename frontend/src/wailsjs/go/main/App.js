@@ -62,10 +62,6 @@ export function HideWindow() {
   return window['go']['main']['App']['HideWindow']();
 }
 
-export function InitSettingsDb() {
-  return window['go']['main']['App']['InitSettingsDb']();
-}
-
 export function IsWindowMaximized() {
   return window['go']['main']['App']['IsWindowMaximized']();
 }
@@ -152,6 +148,10 @@ export function ShowWindow() {
 
 export function SoftReset(arg1) {
   return window['go']['main']['App']['SoftReset'](arg1);
+}
+
+export function StartChangeWatcher(arg1) {
+  return window['go']['main']['App']['StartChangeWatcher'](arg1);
 }
 
 export function Startup(arg1) {

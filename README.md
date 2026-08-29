@@ -10,7 +10,7 @@
 
 - **多仓库管理** - 添加、删除、启用/禁用 Git 仓库
 - **一键同步** - 对多个仓库执行 `git add` → `git commit` → `git pull` → `git push` 全流程
-- **自动同步** - 支持为每个仓库设置独立的自动同步
+- **自动同步** - 支持为每个仓库设置独立的自动同步间隔（每分钟至每天）
 - **仅提交模式** - 支持仅提交不推送，适合内部仓库
 - **同步日志** - 记录每次同步的详细信息（commit、pull、push 输出）
 - **重置项目** - 删除 .git 并重新初始化，保留原分支和远程地址
@@ -92,8 +92,16 @@ wails dev
 
 ### 数据存储
 
-- 配置文件：`{系统临时目录}/data/sync_list.db`
-- 包含：仓库列表、同步日志、窗口状态
+- 配置数据库（由后台服务独占）：`{用户缓存目录}/wtools/data/sync_list.db`（Windows 下为 `%LOCALAPPDATA%\wtools\data\sync_list.db`），包含仓库列表、同步日志、配置
+- UI 状态文件（由界面进程独占）：`{用户缓存目录}/wtools/ui_state.json`，包含窗口大小、位置、最大化状态
+
+### 后台同步服务
+
+- `sync.exe` 是数据库的**唯一访问入口**：建表、迁移、仓库列表、同步日志、配置读写全部由它完成
+- 界面进程不直接读写数据库，所有数据操作通过 HTTP 接口（`127.0.0.1:19090`，仅本机可访问）代理到后台服务
+- 接口列表：`/sync`（手动同步）、`/repos/list`、`/repos/save`、`/logs`、`/fingerprint`（数据变化检测）、`/config/get|set|delete`、`/refresh`
+- 界面点击"同步"或首次启动时会自动拉起同目录下的 `sync.exe`，无需手动运行（请保证两个 exe 在同一目录）
+- 数据变化由界面进程轮询指纹接口检测，变化时通过 Wails 事件推送给前端渲染
 
 ### 打包输出目录
 
@@ -106,15 +114,18 @@ wails dev
 ```
 wcj-go-git/
 ├── main.go              # 应用入口（窗口管理、单实例、DPI处理）
-├── app.go               # 后端核心逻辑（Git同步、数据库操作、重置、打包）
-├── utils.go             # 命令行封装（git操作、URL打开等）
+├── app.go               # 界面后端（数据经 HTTP 代理到 sync 服务、窗口状态 JSON、重置、打包）
+├── utils.go             # 命令行封装（URL 打开等）
+├── types/               # GUI 与 sync 服务共享的数据结构与接口约定
+├── gitcmd/              # 带真实退出码的命令执行封装（隐藏窗口复用 common）
 ├── frontend/
 │   └── src/
 │       ├── pages/
-│       │   └── gitSync.vue    # 主界面（Vue 3 + Element Plus）
+│       │   └── gitSync.vue    # 主界面（Vue 3 + Element Plus 按需导入）
 │       └── wailsjs/           # Wails 生成的 JS 绑定
 ├── sync/
-│   └── main.go         # 后台同步服务（HTTP 服务在 19090 端口）
+│   ├── main.go          # 后台服务：数据库唯一属主（建表/迁移、数据接口、自动同步）
+│   └── main_test.go     # 数据层单元测试（隔离目录，不触碰真实数据）
 ├── wails.json           # Wails 配置
 └── go.mod               # Go 模块定义
 ```
